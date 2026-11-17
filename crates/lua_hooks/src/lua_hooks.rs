@@ -70,9 +70,27 @@ impl LuaHooks {
 }
 
 /// Build an action by name and dispatch it once the current dispatch has finished.
+/// Dispatches to the active window, or, when that is a Lua window or nothing is focused,
+/// to an editor (workspace) window, where workspace/agent/editor actions are handled.
 pub(crate) fn dispatch_deferred(cx: &mut App, name: &str, args: Option<Json>) -> Result<()> {
     let action = cx.build_action(name, args)?;
-    cx.defer(move |cx| cx.dispatch_action(action.as_ref()));
+    cx.defer(move |cx| {
+        let is_lua = |w: &AnyWindowHandle| w.downcast::<ui::LuaWindow>().is_some();
+        let target = cx
+            .active_window()
+            .filter(|w| !is_lua(w))
+            .or_else(|| cx.windows().into_iter().find(|w| !is_lua(w)));
+        match target {
+            Some(window) => {
+                window
+                    .update(cx, |_, window, cx| {
+                        window.dispatch_action(action.boxed_clone(), cx)
+                    })
+                    .ok();
+            }
+            None => cx.dispatch_action(action.as_ref()),
+        }
+    });
     Ok(())
 }
 
