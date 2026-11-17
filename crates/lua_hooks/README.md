@@ -42,6 +42,9 @@ Debug form), `args`, `src` and `orig`.
 - `ycode.hook(name, fn(self, args))`
 - `ycode.new_action(name, fn)`
 - `ycode.ctor(fn)`
+- `ycode.hooks_dir`: the hooks directory (string).
+- `ycode.workspace_folders()`: folders open in workspace windows, the active window's
+  first.
 - `ycode.status_button{ id, action, args?, icon?, label?, tooltip? }`: a button in every
   workspace's status bar that dispatches `action` (a `%new` action or any action);
   `icon` is a snake_case `IconName` (e.g. `"blocks"`), otherwise `label` is shown. The

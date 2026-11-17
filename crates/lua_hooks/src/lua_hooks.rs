@@ -95,6 +95,32 @@ pub(crate) fn dispatch_deferred(cx: &mut App, name: &str, args: Option<Json>) ->
     Ok(())
 }
 
+/// `ycode.workspace_folders()`: visible worktree roots of every workspace window, the
+/// active window's first, without duplicates.
+pub(crate) fn workspace_folders(cx: &App) -> Vec<String> {
+    let mut windows = cx.windows();
+    if let Some(active) = cx.active_window() {
+        windows.retain(|w| *w != active);
+        windows.insert(0, active);
+    }
+    let mut folders: Vec<String> = Vec::new();
+    for handle in windows {
+        let Some(mw) = handle.downcast::<workspace::MultiWorkspace>() else {
+            continue;
+        };
+        let Ok(mw) = mw.read(cx) else { continue };
+        for ws in mw.workspaces() {
+            for path in ws.read(cx).root_paths(cx) {
+                let p = path.to_string_lossy().into_owned();
+                if !folders.contains(&p) {
+                    folders.push(p);
+                }
+            }
+        }
+    }
+    folders
+}
+
 pub(crate) fn action_names(cx: &App) -> Vec<String> {
     cx.all_action_names()
         .iter()
@@ -266,6 +292,10 @@ impl Host for ActionHost<'_> {
         action_names(self.cx)
     }
 
+    fn workspace_folders(&self) -> Vec<String> {
+        workspace_folders(self.cx)
+    }
+
     fn open_window(&mut self, opts: mlua::Table) -> Result<()> {
         open_window_deferred(self.cx, opts);
         Ok(())
@@ -312,6 +342,10 @@ impl Host for PointHost<'_> {
 
     fn action_names(&self) -> Vec<String> {
         action_names(self.cx)
+    }
+
+    fn workspace_folders(&self) -> Vec<String> {
+        workspace_folders(self.cx)
     }
 
     fn open_window(&mut self, opts: mlua::Table) -> Result<()> {
@@ -560,11 +594,24 @@ fn load(cx: &mut App) {
         module_dirs.push(home.join(".luarocks/share/lua/5.4"));
         module_dirs.push(home.join(".luarocks/lib/lua/5.4"));
     }
-    // Distro-packaged modules (Debian/Ubuntu lua-* packages).
-    module_dirs.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/lua/5.4"));
-    module_dirs.push(PathBuf::from("/usr/share/lua/5.4"));
+    // Distro-packaged modules: Debian multiarch, Fedora/openSUSE lib64, Arch and others.
+    let arch = std::env::consts::ARCH;
+    for dir in [
+        format!("/usr/lib/{arch}-linux-gnu/lua/5.4"),
+        "/usr/lib64/lua/5.4".to_string(),
+        "/usr/lib/lua/5.4".to_string(),
+        "/usr/share/lua/5.4".to_string(),
+    ] {
+        let dir = PathBuf::from(dir);
+        if dir.is_dir() {
+            module_dirs.push(dir);
+        }
+    }
     if let Err(e) = rt.add_module_dirs(&module_dirs) {
         log::error!(target: "lua_hooks", "setting package paths: {e:#}");
+    }
+    if let Err(e) = rt.set_ycode_field("hooks_dir", &dir.to_string_lossy()) {
+        log::error!(target: "lua_hooks", "setting ycode.hooks_dir: {e:#}");
     }
     let errors = rt.load_dir(&dir);
     let errors = install(cx, rt, errors);

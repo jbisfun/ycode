@@ -185,6 +185,10 @@ impl Host for UiHost<'_, '_> {
         crate::action_names(self.cx)
     }
 
+    fn workspace_folders(&self) -> Vec<String> {
+        crate::workspace_folders(self.cx)
+    }
+
     fn open_window(&mut self, opts: Table) -> Result<()> {
         crate::open_window_deferred(self.cx, opts);
         Ok(())

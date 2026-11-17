@@ -41,6 +41,10 @@ pub trait Host {
     fn set_settings(&mut self, _settings: Json) -> Result<()> {
         anyhow::bail!("ycode.settings is not available here")
     }
+    /// Folders open in workspace windows, the active window's first.
+    fn workspace_folders(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Recursively merge `patch` into `base` (objects merge, everything else replaces).
@@ -337,6 +341,12 @@ impl Runtime {
         errors
     }
 
+    /// Set a string field on the `ycode` table (e.g. `ycode.hooks_dir`).
+    pub fn set_ycode_field(&self, key: &str, value: &str) -> Result<()> {
+        let ycode: Table = self.lua.globals().get("ycode").map_err(lua_err)?;
+        ycode.set(key, value).map_err(lua_err)
+    }
+
     /// Buttons registered with `ycode.status_button`, in registration order.
     pub fn status_buttons(&self) -> Vec<StatusButton> {
         self.shared.status_buttons.borrow().clone()
@@ -539,6 +549,16 @@ impl Runtime {
         let prev_kv_set: Value = ycode.get("kv_set")?;
         let prev_palette_hide: Value = ycode.get("palette_hide")?;
         let prev_spawn: Value = ycode.get("spawn")?;
+        let prev_folders: Value = ycode.get("workspace_folders")?;
+        ycode.set(
+            "workspace_folders",
+            scope.create_function(move |_, ()| {
+                let host = host
+                    .try_borrow()
+                    .map_err(|_| mlua::Error::runtime("ycode.workspace_folders: host busy"))?;
+                Ok(host.workspace_folders())
+            })?,
+        )?;
         let busy = |what: &'static str| move |_| mlua::Error::runtime(format!("{what}: host busy"));
         ycode.set(
             "kv_get",
@@ -641,6 +661,7 @@ impl Runtime {
         ycode.set("kv_set", prev_kv_set)?;
         ycode.set("palette_hide", prev_palette_hide)?;
         ycode.set("spawn", prev_spawn)?;
+        ycode.set("workspace_folders", prev_folders)?;
         gpui.set("open_window", prev_open)?;
         result
     }
