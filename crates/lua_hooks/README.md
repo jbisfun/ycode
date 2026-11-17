@@ -42,6 +42,10 @@ Debug form), `args`, `src` and `orig`.
 - `ycode.hook(name, fn(self, args))`
 - `ycode.new_action(name, fn)`
 - `ycode.ctor(fn)`
+- `ycode.status_button{ id, action, args?, icon?, label?, tooltip? }`: a button in every
+  workspace's status bar that dispatches `action` (a `%new` action or any action);
+  `icon` is a snake_case `IconName` (e.g. `"blocks"`), otherwise `label` is shown. The
+  same `id` replaces a button; buttons go away when their mod is unloaded.
 
 `ycode.dispatch` and `ycode.actions` only work inside a hook or ctor.
 

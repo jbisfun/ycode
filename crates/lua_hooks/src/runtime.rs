@@ -86,6 +86,25 @@ struct Shared {
     dirty: Cell<bool>,
     groups: RefCell<HashSet<String>>,
     log: RefCell<Vec<String>>,
+    status_buttons: RefCell<Vec<StatusButton>>,
+}
+
+/// A button in every workspace's status bar, from `ycode.status_button{...}`.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct StatusButton {
+    /// Identifies the button; registering the same id again replaces it.
+    pub id: String,
+    /// Action to dispatch on click (a `%new` action or any registered action).
+    pub action: String,
+    #[serde(default)]
+    pub args: Option<Json>,
+    /// Icon name (snake_case `IconName`, e.g. `"settings"`); a label is shown otherwise.
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub tooltip: Option<String>,
 }
 
 pub struct Runtime {
@@ -181,6 +200,18 @@ impl Runtime {
                     s.groups.borrow_mut().insert(g);
                     s.dirty.set(true);
                 }
+                Ok(())
+            })?,
+        )?;
+
+        let s = shared.clone();
+        ycode.set(
+            "status_button",
+            lua.create_function(move |lua, spec: Value| {
+                let button: StatusButton = lua.from_value(spec)?;
+                let mut buttons = s.status_buttons.borrow_mut();
+                buttons.retain(|b| b.id != button.id);
+                buttons.push(button);
                 Ok(())
             })?,
         )?;
@@ -304,6 +335,11 @@ impl Runtime {
             }
         }
         errors
+    }
+
+    /// Buttons registered with `ycode.status_button`, in registration order.
+    pub fn status_buttons(&self) -> Vec<StatusButton> {
+        self.shared.status_buttons.borrow().clone()
     }
 
     /// Extension directories under `dir` (for adding their `lib/` to package paths).
@@ -708,6 +744,22 @@ mod tests {
         let rt = Runtime::new().unwrap();
         rt.load_str("t.x.lua", src, true).unwrap();
         rt
+    }
+
+    #[test]
+    fn status_buttons_replace_by_id() {
+        let rt = Runtime::new().unwrap();
+        rt.load_str(
+            "b.lua",
+            "ycode.status_button{ id = 'm', action = 'a::B', icon = 'settings' }\n\
+             ycode.status_button{ id = 'm', action = 'a::C', label = 'Mods' }",
+            false,
+        )
+        .unwrap();
+        let b = rt.status_buttons();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].action, "a::C");
+        assert_eq!(b[0].label.as_deref(), Some("Mods"));
     }
 
     #[test]

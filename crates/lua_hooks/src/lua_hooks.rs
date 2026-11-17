@@ -12,6 +12,7 @@
 
 pub mod preprocess;
 pub mod runtime;
+pub mod status;
 pub mod ui;
 
 pub use runtime::{Host, Runtime};
@@ -418,6 +419,7 @@ pub fn init(cx: &mut App) {
     });
 
     cx.on_action(|_: &ReloadHooks, cx| load(cx));
+    status::init(cx);
     // `%new` actions show up in the command palette like registered ones.
     GlobalCommandPaletteSource::set(cx, |cx| {
         let Some(rt) = LuaHooks::runtime(cx) else {
@@ -597,6 +599,8 @@ pub fn install(cx: &mut App, rt: Runtime, mut errors: Vec<String>) -> Vec<String
         log::error!(target: "lua_hooks", "{e}");
     }
     log::info!(target: "lua_hooks", "{} active hooks", rt.active_hooks().len());
+    // Status bar buttons come from the runtime; redraw them.
+    cx.refresh_windows();
     errors
 }
 
