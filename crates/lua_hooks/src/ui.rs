@@ -206,6 +206,10 @@ impl Host for UiHost<'_, '_> {
     fn palette_hide(&mut self, namespace: &str) -> Result<()> {
         crate::palette_hide(self.cx, namespace)
     }
+
+    fn spawn(&mut self, cmd: String, callback: mlua::Function) -> Result<()> {
+        crate::spawn_command(self.cx, cmd, callback)
+    }
 }
 
 /// The `w` table handed to window callbacks.

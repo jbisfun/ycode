@@ -18,7 +18,7 @@ pub use runtime::{Host, Runtime};
 
 use anyhow::Result;
 use command_palette_hooks::{CommandPaletteFilter, GlobalCommandPaletteSource};
-use gpui::{Action, AnyWindowHandle, App, BorrowAppContext as _, Global, actions};
+use gpui::{Action, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Global, actions};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value as Json;
@@ -149,6 +149,57 @@ fn humanize(name: &str) -> String {
     command_palette::humanize_action_name(name)
 }
 
+/// `ycode.spawn`: run a shell command on the background executor, then call the Lua
+/// callback on the main thread, unless the runtime was reloaded in the meantime.
+pub(crate) fn spawn_command(cx: &mut App, cmd: String, callback: mlua::Function) -> Result<()> {
+    let Some(rt) = LuaHooks::runtime(cx) else {
+        anyhow::bail!("no Lua runtime");
+    };
+    let weak = Rc::downgrade(&rt);
+    let job = cx.background_spawn(async move {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .stdin(std::process::Stdio::null())
+            .output()
+    });
+    cx.spawn(async move |cx| {
+        let output = job.await;
+        cx.update(|cx| {
+            let (Some(rt), Some(current)) = (weak.upgrade(), LuaHooks::runtime(cx)) else {
+                return;
+            };
+            if !Rc::ptr_eq(&rt, &current) {
+                return;
+            }
+            let (ok, text, code) = match output {
+                Ok(o) => {
+                    let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+                    text.push_str(&String::from_utf8_lossy(&o.stderr));
+                    (o.status.success(), text, o.status.code().unwrap_or(-1))
+                }
+                Err(e) => (false, e.to_string(), -1),
+            };
+            let mut host = ActionHost {
+                cx,
+                action: None,
+                orig: None,
+            };
+            let cell = RefCell::new(&mut host);
+            if let Err(e) = rt.with_host(&cell, |_| callback.call::<()>((ok, text, code))) {
+                log::error!(target: "lua_hooks", "ycode.spawn callback: {e}");
+            }
+            drop(cell);
+            let errors = rt.run_ctors(&mut host);
+            for e in errors {
+                log::error!(target: "lua_hooks", "{e}");
+            }
+        });
+    })
+    .detach();
+    Ok(())
+}
+
 /// Open a Lua window after the current update (Lua may be running inside another window).
 pub(crate) fn open_window_deferred(cx: &mut App, opts: mlua::Table) {
     cx.defer(move |cx| {
@@ -217,6 +268,10 @@ impl Host for ActionHost<'_> {
     fn palette_hide(&mut self, namespace: &str) -> Result<()> {
         palette_hide(self.cx, namespace)
     }
+
+    fn spawn(&mut self, cmd: String, callback: mlua::Function) -> Result<()> {
+        spawn_command(self.cx, cmd, callback)
+    }
 }
 
 /// [`Host`] for a Rust-side hook point (see [`call_point`]).
@@ -260,6 +315,10 @@ impl Host for PointHost<'_> {
 
     fn palette_hide(&mut self, namespace: &str) -> Result<()> {
         palette_hide(self.cx, namespace)
+    }
+
+    fn spawn(&mut self, cmd: String, callback: mlua::Function) -> Result<()> {
+        spawn_command(self.cx, cmd, callback)
     }
 }
 
@@ -500,6 +559,17 @@ pub fn install(cx: &mut App, rt: Runtime, mut errors: Vec<String>) -> Vec<String
         cx.update_global(|store: &mut SettingsStore, cx| store.set_plugin_settings("", cx))
             .ok();
     }
+    let rt = Rc::new(rt);
+    if let Some(hooks) = cx.try_global::<LuaHooks>().cloned() {
+        // Windows run callbacks in the old Lua state; close them with it.
+        for handle in hooks.windows.take() {
+            handle
+                .update(cx, |_, window, _| window.remove_window())
+                .ok();
+        }
+        // Installed before ctors run, so they can use APIs that need it (ycode.spawn).
+        *hooks.runtime.borrow_mut() = Some(rt.clone());
+    }
     errors.extend(rt.run_ctors(&mut ActionHost {
         cx,
         action: None,
@@ -509,15 +579,6 @@ pub fn install(cx: &mut App, rt: Runtime, mut errors: Vec<String>) -> Vec<String
         log::error!(target: "lua_hooks", "{e}");
     }
     log::info!(target: "lua_hooks", "{} active hooks", rt.active_hooks().len());
-    if let Some(hooks) = cx.try_global::<LuaHooks>().cloned() {
-        // Windows run callbacks in the old Lua state; close them with it.
-        for handle in hooks.windows.take() {
-            handle
-                .update(cx, |_, window, _| window.remove_window())
-                .ok();
-        }
-        *hooks.runtime.borrow_mut() = Some(Rc::new(rt));
-    }
     errors
 }
 

@@ -29,6 +29,10 @@ pub trait Host {
     fn kv_set(&mut self, _key: &str, _value: Option<String>) -> Result<()> {
         anyhow::bail!("ycode.kv is not available here")
     }
+    /// Run `sh -c cmd` off the main thread; later call `callback(ok, output, code)`.
+    fn spawn(&mut self, _cmd: String, _callback: Function) -> Result<()> {
+        anyhow::bail!("ycode.spawn is not available here")
+    }
     /// Hide every action in `namespace` from the command palette.
     fn palette_hide(&mut self, _namespace: &str) -> Result<()> {
         anyhow::bail!("ycode.palette_hide is not available here")
@@ -147,6 +151,22 @@ impl Runtime {
             })?,
         )?;
 
+        // JSON via serde_json (null <-> nil, arrays <-> sequences).
+        ycode.set(
+            "json_decode",
+            lua.create_function(|lua, s: String| {
+                let v: Json = serde_json::from_str(&s).map_err(mlua::Error::external)?;
+                lua.to_value(&v)
+            })?,
+        )?;
+        ycode.set(
+            "json_encode",
+            lua.create_function(|lua, v: Value| {
+                let v: Json = lua.from_value(v)?;
+                serde_json::to_string(&v).map_err(mlua::Error::external)
+            })?,
+        )?;
+
         // `print` goes to the same place as ycode.log (hook log / executor), not stdout.
         lua.globals().set("print", ycode.get::<Function>("log")?)?;
 
@@ -180,6 +200,7 @@ impl Runtime {
             (&ycode, "kv_get"),
             (&ycode, "kv_set"),
             (&ycode, "palette_hide"),
+            (&ycode, "spawn"),
             (&gpui, "open_window"),
         ] {
             let msg = format!("{name} is only available inside a hook, %ctor or window callback");
@@ -481,6 +502,7 @@ impl Runtime {
         let prev_kv_get: Value = ycode.get("kv_get")?;
         let prev_kv_set: Value = ycode.get("kv_set")?;
         let prev_palette_hide: Value = ycode.get("palette_hide")?;
+        let prev_spawn: Value = ycode.get("spawn")?;
         let busy = |what: &'static str| move |_| mlua::Error::runtime(format!("{what}: host busy"));
         ycode.set(
             "kv_get",
@@ -494,6 +516,13 @@ impl Runtime {
             scope.create_function(move |_, (key, value): (String, Option<String>)| {
                 let mut host = host.try_borrow_mut().map_err(busy("ycode.kv_set"))?;
                 host.kv_set(&key, value).map_err(mlua::Error::external)
+            })?,
+        )?;
+        ycode.set(
+            "spawn",
+            scope.create_function(move |_, (cmd, callback): (String, Function)| {
+                let mut host = host.try_borrow_mut().map_err(busy("ycode.spawn"))?;
+                host.spawn(cmd, callback).map_err(mlua::Error::external)
             })?,
         )?;
         ycode.set(
@@ -575,6 +604,7 @@ impl Runtime {
         ycode.set("kv_get", prev_kv_get)?;
         ycode.set("kv_set", prev_kv_set)?;
         ycode.set("palette_hide", prev_palette_hide)?;
+        ycode.set("spawn", prev_spawn)?;
         gpui.set("open_window", prev_open)?;
         result
     }
@@ -926,6 +956,19 @@ end
             &serde_json::json!({"title_bar": {"show_sign_in": false, "show_user_picture": false}, "auto_update": false})
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn json_round_trip() {
+        let rt = Runtime::new().unwrap();
+        rt.load_str(
+            "t.lua",
+            r#"local t = ycode.json_decode('{"a": [1, 2], "b": {"c": "x"}}')
+               print(t.a[2], t.b.c, ycode.json_encode({ k = true }))"#,
+            false,
+        )
+        .unwrap();
+        assert_eq!(rt.take_log(), vec![r#"2 x {"k":true}"#]);
     }
 
     #[test]
