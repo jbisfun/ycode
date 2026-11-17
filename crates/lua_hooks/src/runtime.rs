@@ -22,6 +22,22 @@ pub trait Host {
     fn open_window(&mut self, _opts: Table) -> Result<()> {
         anyhow::bail!("gpui.open_window is not available here")
     }
+    /// Replace the plugin settings layer with `settings` (all `ycode.settings` calls merged).
+    fn set_settings(&mut self, _settings: Json) -> Result<()> {
+        anyhow::bail!("ycode.settings is not available here")
+    }
+}
+
+/// Recursively merge `patch` into `base` (objects merge, everything else replaces).
+pub fn merge_json(base: &mut Json, patch: Json) {
+    match (base, patch) {
+        (Json::Object(b), Json::Object(p)) => {
+            for (k, v) in p {
+                merge_json(b.entry(k).or_insert(Json::Null), v);
+            }
+        }
+        (b, p) => *b = p,
+    }
 }
 
 const PRELUDE: &str = r#"
@@ -61,6 +77,8 @@ pub struct Runtime {
     lua: Lua,
     shared: Rc<Shared>,
     index: RefCell<Vec<Hook>>,
+    /// Everything passed to `ycode.settings`, merged.
+    settings: RefCell<Json>,
 }
 
 /// `editor::Copy` matches `editor::Copy`, `editor::*` and `*` / `*::*`.
@@ -72,6 +90,13 @@ pub fn pattern_matches(pattern: &str, name: &str) -> bool {
         Some(prefix) if prefix.ends_with("::") => name.starts_with(prefix),
         _ => false,
     }
+}
+
+/// `lib/` holds `require`-able modules, and dot-directories (.git, ...) are never extensions.
+fn is_module_or_hidden(p: &Path) -> bool {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .is_none_or(|n| n == "lib" || n.starts_with('.'))
 }
 
 fn lua_err(e: mlua::Error) -> anyhow::Error {
@@ -140,6 +165,7 @@ impl Runtime {
             (&ycode, "dispatch"),
             (&ycode, "actions"),
             (&ycode, "eval"),
+            (&ycode, "settings"),
             (&gpui, "open_window"),
         ] {
             let msg = format!("{name} is only available inside a hook, %ctor or window callback");
@@ -168,6 +194,7 @@ impl Runtime {
             lua,
             shared,
             index: RefCell::default(),
+            settings: RefCell::new(Json::Object(Default::default())),
         })
     }
 
@@ -201,9 +228,22 @@ impl Runtime {
             .map_err(lua_err)
     }
 
-    /// Load `*.lua` and `*.x.lua` files from `dir` in name order. Returns per-file errors;
-    /// a broken file does not stop the others from loading.
+    /// Load `*.lua` and `*.x.lua` files from `dir` in name order, then each extension
+    /// subdirectory the same way. Returns per-file errors; a broken file does not stop
+    /// the others from loading.
     pub fn load_dir(&self, dir: &Path) -> Vec<String> {
+        self.load_tree(dir)
+    }
+
+    fn load_files(&self, dir: &Path) -> Vec<String> {
+        self.load_level(dir, false)
+    }
+
+    fn load_tree(&self, dir: &Path) -> Vec<String> {
+        self.load_level(dir, true)
+    }
+
+    fn load_level(&self, dir: &Path, with_subdirs: bool) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
@@ -222,7 +262,25 @@ impl Runtime {
                 errors.push(format!("{e:#}"));
             }
         }
+        if with_subdirs {
+            // Extensions: one level of subdirectories (not `lib/`, which holds modules).
+            for sub in Self::extension_dirs(dir) {
+                errors.extend(self.load_files(&sub));
+            }
+        }
         errors
+    }
+
+    /// Extension directories under `dir` (for adding their `lib/` to package paths).
+    pub fn extension_dirs(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut dirs: Vec<_> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_dir() && !is_module_or_hidden(p))
+            .collect();
+        dirs.sort();
+        dirs
     }
 
     /// Run (and consume) pending `%ctor` blocks.
@@ -390,6 +448,22 @@ impl Runtime {
         let prev_dispatch: Value = ycode.get("dispatch")?;
         let prev_actions: Value = ycode.get("actions")?;
         let prev_eval: Value = ycode.get("eval")?;
+        let prev_settings: Value = ycode.get("settings")?;
+        ycode.set(
+            "settings",
+            scope.create_function(move |lua, patch: Value| {
+                let patch: Json = lua.from_value(patch)?;
+                let merged = {
+                    let mut settings = self.settings.borrow_mut();
+                    merge_json(&mut settings, patch);
+                    settings.clone()
+                };
+                let mut host = host
+                    .try_borrow_mut()
+                    .map_err(|_| mlua::Error::runtime("ycode.settings: host busy"))?;
+                host.set_settings(merged).map_err(mlua::Error::external)
+            })?,
+        )?;
         let prev_open: Value = gpui.get("open_window")?;
         ycode.set(
             "eval",
@@ -440,6 +514,7 @@ impl Runtime {
         ycode.set("dispatch", prev_dispatch)?;
         ycode.set("actions", prev_actions)?;
         ycode.set("eval", prev_eval)?;
+        ycode.set("settings", prev_settings)?;
         gpui.set("open_window", prev_open)?;
         result
     }
@@ -746,6 +821,51 @@ end
         let log = rt.take_log();
         assert_eq!(log.len(), 1);
         assert!(log[0] == "function function function", "{log:?}");
+    }
+
+    #[test]
+    fn settings_merge_and_extensions() {
+        #[derive(Default)]
+        struct SettingsHost(Vec<Json>);
+        impl Host for SettingsHost {
+            fn call_orig(&mut self, _: Option<Json>) -> Result<Option<Json>> {
+                Ok(None)
+            }
+            fn dispatch(&mut self, _: &str, _: Option<Json>) -> Result<()> {
+                Ok(())
+            }
+            fn action_names(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn set_settings(&mut self, s: Json) -> Result<()> {
+                self.0.push(s);
+                Ok(())
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("lua_hooks_ext_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ext/lib")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join("a.x.lua"),
+            "%ctor\n ycode.settings{ title_bar = { show_sign_in = false } }\nend",
+        )
+        .unwrap();
+        std::fs::write(dir.join("ext/b.x.lua"), "%ctor\n ycode.settings{ title_bar = { show_user_picture = false }, auto_update = false }\nend").unwrap();
+        std::fs::write(
+            dir.join("ext/lib/m.lua"),
+            "error('modules must not be loaded as hooks')",
+        )
+        .unwrap();
+        std::fs::write(dir.join(".git/c.lua"), "error('hidden dirs are skipped')").unwrap();
+        let rt = Runtime::new().unwrap();
+        assert!(rt.load_dir(&dir).is_empty());
+        let mut host = SettingsHost::default();
+        assert!(rt.run_ctors(&mut host).is_empty());
+        assert_eq!(
+            host.0.last().unwrap(),
+            &serde_json::json!({"title_bar": {"show_sign_in": false, "show_user_picture": false}, "auto_update": false})
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

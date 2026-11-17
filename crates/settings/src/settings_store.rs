@@ -159,6 +159,8 @@ pub struct SettingsStore {
 
     extension_settings: Option<Box<SettingsContent>>,
     server_settings: Option<Box<SettingsContent>>,
+    /// In-memory overrides from runtime plugins (Lua hooks), above user settings.
+    plugin_settings: Option<Box<SettingsContent>>,
 
     language_semantic_token_rules: HashMap<SharedString, SemanticTokenRules>,
 
@@ -320,6 +322,7 @@ impl SettingsStore {
             default_settings: default_settings.clone(),
             global_settings: None,
             server_settings: None,
+            plugin_settings: None,
             user_settings: None,
             extension_settings: None,
             language_semantic_token_rules: HashMap::default(),
@@ -1017,6 +1020,19 @@ impl SettingsStore {
         return parse_result;
     }
 
+    /// Replace the plugin settings layer (merged after user settings, before server
+    /// settings). An empty string clears it. Never written to disk.
+    pub fn set_plugin_settings(&mut self, content: &str, cx: &mut App) -> Result<()> {
+        let settings = if content.is_empty() {
+            None
+        } else {
+            Option::<SettingsContent>::parse_json_with_comments(content)?
+        };
+        self.plugin_settings = settings.map(Box::new);
+        self.recompute_values(None, cx);
+        Ok(())
+    }
+
     pub fn set_server_settings(
         &mut self,
         server_settings_content: &str,
@@ -1394,6 +1410,7 @@ impl SettingsStore {
                     merged.merge_from(&profile.settings);
                 }
             }
+            merged.merge_from_option(self.plugin_settings.as_deref());
             merged.merge_from_option(self.server_settings.as_deref());
 
             // Merge `disable_ai` from all project/local settings into the global value.

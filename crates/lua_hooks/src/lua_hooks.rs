@@ -17,10 +17,11 @@ pub mod ui;
 pub use runtime::{Host, Runtime};
 
 use anyhow::Result;
-use gpui::{Action, AnyWindowHandle, App, Global, actions};
+use gpui::{Action, AnyWindowHandle, App, BorrowAppContext as _, Global, actions};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value as Json;
+use settings::SettingsStore;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -83,6 +84,18 @@ pub(crate) fn action_names(cx: &App) -> Vec<String> {
         .collect()
 }
 
+/// Apply the merged `ycode.settings` layer after the current update.
+pub(crate) fn set_plugin_settings_deferred(cx: &mut App, settings: Json) {
+    cx.defer(move |cx| {
+        let content = settings.to_string();
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            if let Err(e) = store.set_plugin_settings(&content, cx) {
+                log::error!(target: "lua_hooks", "ycode.settings: {e:#}");
+            }
+        });
+    });
+}
+
 /// Open a Lua window after the current update (Lua may be running inside another window).
 pub(crate) fn open_window_deferred(cx: &mut App, opts: mlua::Table) {
     cx.defer(move |cx| {
@@ -134,6 +147,11 @@ impl Host for ActionHost<'_> {
         open_window_deferred(self.cx, opts);
         Ok(())
     }
+
+    fn set_settings(&mut self, settings: Json) -> Result<()> {
+        set_plugin_settings_deferred(self.cx, settings);
+        Ok(())
+    }
 }
 
 /// [`Host`] for a Rust-side hook point (see [`call_point`]).
@@ -159,6 +177,11 @@ impl Host for PointHost<'_> {
 
     fn open_window(&mut self, opts: mlua::Table) -> Result<()> {
         open_window_deferred(self.cx, opts);
+        Ok(())
+    }
+
+    fn set_settings(&mut self, settings: Json) -> Result<()> {
+        set_plugin_settings_deferred(self.cx, settings);
         Ok(())
     }
 }
@@ -363,6 +386,9 @@ fn load(cx: &mut App) {
         }
     };
     let mut module_dirs = vec![dir.join("lib"), dir.clone()];
+    for ext in Runtime::extension_dirs(&dir) {
+        module_dirs.push(ext.join("lib"));
+    }
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         // luarocks --local
         module_dirs.push(home.join(".luarocks/share/lua/5.4"));
@@ -381,6 +407,11 @@ fn load(cx: &mut App) {
 
 /// Run pending `%ctor`s and make `rt` the active runtime. Returns all errors.
 pub fn install(cx: &mut App, rt: Runtime, mut errors: Vec<String>) -> Vec<String> {
+    // The plugin settings layer belongs to the runtime being replaced.
+    if cx.has_global::<SettingsStore>() {
+        cx.update_global(|store: &mut SettingsStore, cx| store.set_plugin_settings("", cx))
+            .ok();
+    }
     errors.extend(rt.run_ctors(&mut ActionHost {
         cx,
         action: None,

@@ -889,11 +889,16 @@ fn main() {
 
         cx.activate(true);
 
-        cx.spawn({
+        // `%hookf client::authenticate` can veto the automatic sign-in (e.g. ycode-offline).
+        lua_hooks::call_point(cx, "client::authenticate", serde_json::Value::Null, {
             let client = app_state.client.clone();
-            async move |cx| authenticate(client, cx).await
-        })
-        .detach_and_log_err(cx);
+            move |_, cx| {
+                let client = client.clone();
+                cx.spawn(async move |cx| authenticate(client, cx).await)
+                    .detach_and_log_err(cx);
+                serde_json::Value::Null
+            }
+        });
 
         let urls: Vec<_> = args
             .paths_or_urls

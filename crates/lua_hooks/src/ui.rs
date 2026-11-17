@@ -189,6 +189,11 @@ impl Host for UiHost<'_, '_> {
         crate::open_window_deferred(self.cx, opts);
         Ok(())
     }
+
+    fn set_settings(&mut self, settings: Json) -> Result<()> {
+        crate::set_plugin_settings_deferred(self.cx, settings);
+        Ok(())
+    }
 }
 
 /// The `w` table handed to window callbacks.
