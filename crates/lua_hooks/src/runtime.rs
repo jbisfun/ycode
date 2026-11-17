@@ -45,6 +45,10 @@ pub trait Host {
     fn workspace_folders(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Open a file in the workspace (editor tab).
+    fn open_path(&mut self, _path: String) -> Result<()> {
+        anyhow::bail!("ycode.open is not available here")
+    }
 }
 
 /// Recursively merge `patch` into `base` (objects merge, everything else replaces).
@@ -91,6 +95,8 @@ struct Shared {
     groups: RefCell<HashSet<String>>,
     log: RefCell<Vec<String>>,
     status_buttons: RefCell<Vec<StatusButton>>,
+    /// `gpui.register_panel{...}` specs by id, in registration order.
+    panels: RefCell<Vec<(String, Table)>>,
 }
 
 /// A button in every workspace's status bar, from `ycode.status_button{...}`.
@@ -227,6 +233,20 @@ impl Runtime {
         )?;
 
         let gpui = lua.create_table()?;
+        let s = shared.clone();
+        gpui.set(
+            "register_panel",
+            lua.create_function(move |_, opts: Table| {
+                let id: String = opts
+                    .get::<Option<String>>("id")?
+                    .ok_or_else(|| mlua::Error::runtime("gpui.register_panel: `id` is required"))?;
+                let mut panels = s.panels.borrow_mut();
+                panels.retain(|(i, _)| *i != id);
+                panels.push((id, opts));
+                Ok(())
+            })?,
+        )?;
+
         for (table, name) in [
             (&ycode, "dispatch"),
             (&ycode, "actions"),
@@ -345,6 +365,11 @@ impl Runtime {
     pub fn set_ycode_field(&self, key: &str, value: &str) -> Result<()> {
         let ycode: Table = self.lua.globals().get("ycode").map_err(lua_err)?;
         ycode.set(key, value).map_err(lua_err)
+    }
+
+    /// Panels registered with `gpui.register_panel`, in registration order.
+    pub fn panels(&self) -> Vec<(String, Table)> {
+        self.shared.panels.borrow().clone()
     }
 
     /// Buttons registered with `ycode.status_button`, in registration order.
@@ -550,6 +575,16 @@ impl Runtime {
         let prev_palette_hide: Value = ycode.get("palette_hide")?;
         let prev_spawn: Value = ycode.get("spawn")?;
         let prev_folders: Value = ycode.get("workspace_folders")?;
+        let prev_open_path: Value = ycode.get("open")?;
+        ycode.set(
+            "open",
+            scope.create_function(move |_, path: String| {
+                let mut host = host
+                    .try_borrow_mut()
+                    .map_err(|_| mlua::Error::runtime("ycode.open: host busy"))?;
+                host.open_path(path).map_err(mlua::Error::external)
+            })?,
+        )?;
         ycode.set(
             "workspace_folders",
             scope.create_function(move |_, ()| {
@@ -662,6 +697,7 @@ impl Runtime {
         ycode.set("palette_hide", prev_palette_hide)?;
         ycode.set("spawn", prev_spawn)?;
         ycode.set("workspace_folders", prev_folders)?;
+        ycode.set("open", prev_open_path)?;
         gpui.set("open_window", prev_open)?;
         result
     }

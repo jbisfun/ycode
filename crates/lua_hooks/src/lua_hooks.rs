@@ -10,6 +10,7 @@
 //! via `ycode.hook(name, fn)`, `ycode.new_action(name, fn)` and `ycode.ctor(fn)`.
 //! Run `ycode: reload hooks` to reload them.
 
+pub mod panel;
 pub mod preprocess;
 pub mod runtime;
 pub mod status;
@@ -40,6 +41,15 @@ pub struct Run {
     /// Value passed to the Lua function's first parameter.
     #[serde(default)]
     pub args: Option<Json>,
+}
+
+/// Shows and focuses a Lua panel (`gpui.register_panel`), or hides it if focused.
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = ycode)]
+#[serde(deny_unknown_fields)]
+pub struct TogglePanel {
+    /// The panel's `id`.
+    pub id: String,
 }
 
 actions!(
@@ -93,6 +103,36 @@ pub(crate) fn dispatch_deferred(cx: &mut App, name: &str, args: Option<Json>) ->
         }
     });
     Ok(())
+}
+
+/// `ycode.open(path)`: open a file in the active (or first) workspace window.
+pub(crate) fn open_path_deferred(cx: &mut App, path: String) {
+    cx.defer(move |cx| {
+        let mut windows = cx.windows();
+        if let Some(active) = cx.active_window() {
+            windows.retain(|w| *w != active);
+            windows.insert(0, active);
+        }
+        let Some(mw) = windows
+            .into_iter()
+            .find_map(|w| w.downcast::<workspace::MultiWorkspace>())
+        else {
+            log::warn!(target: "lua_hooks", "ycode.open: no workspace window");
+            return;
+        };
+        mw.update(cx, |mw, window, cx| {
+            mw.workspace().update(cx, |ws, cx| {
+                ws.open_abs_path(
+                    PathBuf::from(&path),
+                    workspace::OpenOptions::default(),
+                    window,
+                    cx,
+                )
+                .detach();
+            });
+        })
+        .ok();
+    });
 }
 
 /// `ycode.workspace_folders()`: visible worktree roots of every workspace window, the
@@ -296,6 +336,11 @@ impl Host for ActionHost<'_> {
         workspace_folders(self.cx)
     }
 
+    fn open_path(&mut self, path: String) -> Result<()> {
+        open_path_deferred(self.cx, path);
+        Ok(())
+    }
+
     fn open_window(&mut self, opts: mlua::Table) -> Result<()> {
         open_window_deferred(self.cx, opts);
         Ok(())
@@ -346,6 +391,11 @@ impl Host for PointHost<'_> {
 
     fn workspace_folders(&self) -> Vec<String> {
         workspace_folders(self.cx)
+    }
+
+    fn open_path(&mut self, path: String) -> Result<()> {
+        open_path_deferred(self.cx, path);
+        Ok(())
     }
 
     fn open_window(&mut self, opts: mlua::Table) -> Result<()> {
@@ -454,6 +504,7 @@ pub fn init(cx: &mut App) {
 
     cx.on_action(|_: &ReloadHooks, cx| load(cx));
     status::init(cx);
+    panel::init(cx);
     // `%new` actions show up in the command palette like registered ones.
     GlobalCommandPaletteSource::set(cx, |cx| {
         let Some(rt) = LuaHooks::runtime(cx) else {
@@ -646,8 +697,9 @@ pub fn install(cx: &mut App, rt: Runtime, mut errors: Vec<String>) -> Vec<String
         log::error!(target: "lua_hooks", "{e}");
     }
     log::info!(target: "lua_hooks", "{} active hooks", rt.active_hooks().len());
-    // Status bar buttons come from the runtime; redraw them.
+    // Status bar buttons and dock panels come from the runtime; rebuild them.
     cx.refresh_windows();
+    panel::sync_all(cx);
     errors
 }
 

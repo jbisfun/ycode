@@ -540,6 +540,12 @@ impl Dock {
             .position(|entry| entry.panel.remote_id() == Some(panel_id))
     }
 
+    pub fn panel_index_for_id(&self, panel_id: EntityId) -> Option<usize> {
+        self.panel_entries
+            .iter()
+            .position(|entry| entry.panel.panel_id() == panel_id)
+    }
+
     pub fn panel_for_id(&self, panel_id: EntityId) -> Option<&Arc<dyn PanelHandle>> {
         self.panel_entries
             .iter()

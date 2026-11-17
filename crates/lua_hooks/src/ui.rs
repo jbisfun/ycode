@@ -68,9 +68,100 @@ pub struct LuaWindow {
     auto_id: usize,
     last_error: Option<String>,
     title_bar: Option<Entity<PlatformTitleBar>>,
+    /// Rendered inside a dock panel instead of its own window.
+    in_panel: bool,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _poll: Option<Task<()>>,
+}
+
+/// The Lua side of a view: `render`, `on_key`, `state`, `focus`, `poll_ms` from `opts`.
+pub(crate) struct ViewOpts {
+    render_fn: Function,
+    on_key: Option<Function>,
+    state: Table,
+    initial_focus: Option<String>,
+    poll_ms: Option<u64>,
+}
+
+impl ViewOpts {
+    pub(crate) fn parse(rt: &Runtime, opts: &Table, what: &str) -> mlua::Result<Self> {
+        Ok(Self {
+            render_fn: opts
+                .get::<Option<Function>>("render")?
+                .ok_or_else(|| rt_err(format!("{what}: `render` function is required")))?,
+            on_key: opts.get("on_key")?,
+            state: match opts.get::<Option<Table>>("state")? {
+                Some(t) => t,
+                None => rt.lua().create_table()?,
+            },
+            initial_focus: opts.get("focus")?,
+            poll_ms: opts.get("poll_ms")?,
+        })
+    }
+}
+
+impl LuaWindow {
+    /// A Lua-rendered view, for a window of its own or (`in_panel`) a dock panel.
+    pub(crate) fn new(
+        rt: Rc<Runtime>,
+        o: ViewOpts,
+        in_panel: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let wh = window.window_handle();
+        let weak: gpui::WeakEntity<LuaWindow> = cx.entity().downgrade();
+        let focus_handle = cx.focus_handle();
+        let key_focus = focus_handle.clone();
+        let key_sub = cx.intercept_keystrokes(
+            move |ev: &KeystrokeEvent, window: &mut Window, cx: &mut App| {
+                if window.window_handle() != wh {
+                    return;
+                }
+                // A panel shares the workspace window: only keys typed inside it.
+                if in_panel && !key_focus.contains_focused(window, cx) {
+                    return;
+                }
+                let Some(this) = weak.upgrade() else {
+                    return;
+                };
+                if this.update(cx, |this: &mut LuaWindow, cx| this.key(ev, window, cx)) {
+                    cx.stop_propagation();
+                }
+            },
+        );
+        let poll = o.poll_ms.map(|ms| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(ms.max(16)))
+                        .await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        let title_bar = (!in_panel && !cfg!(target_os = "macos"))
+            .then(|| cx.new(|cx| PlatformTitleBar::new("lua-window-title-bar", cx)));
+        LuaWindow {
+            rt,
+            render_fn: o.render_fn,
+            on_key: o.on_key,
+            state: o.state,
+            editors: HashMap::default(),
+            scrolls: HashMap::default(),
+            initial_focus: o.initial_focus,
+            auto_id: 0,
+            last_error: None,
+            title_bar,
+            in_panel,
+            focus_handle,
+            _subscriptions: vec![key_sub],
+            _poll: poll,
+        }
+    }
 }
 
 /// Open a window described by `opts` (see module docs).
@@ -80,16 +171,7 @@ pub fn open_window(cx: &mut App, rt: Rc<Runtime>, opts: Table) -> mlua::Result<A
         .unwrap_or_else(|| "ycode".into());
     let width: f32 = opts.get::<Option<f32>>("width")?.unwrap_or(720.);
     let height: f32 = opts.get::<Option<f32>>("height")?.unwrap_or(480.);
-    let render_fn: Function = opts
-        .get::<Option<Function>>("render")?
-        .ok_or_else(|| rt_err("gpui.open_window: `render` function is required"))?;
-    let on_key: Option<Function> = opts.get("on_key")?;
-    let state: Table = match opts.get::<Option<Table>>("state")? {
-        Some(t) => t,
-        None => rt.lua().create_table()?,
-    };
-    let initial_focus: Option<String> = opts.get("focus")?;
-    let poll_ms: Option<u64> = opts.get("poll_ms")?;
+    let view_opts = ViewOpts::parse(&rt, &opts, "gpui.open_window")?;
 
     let size = gpui::size(px(width), px(height));
     let display_id = cx.active_display().map(|d| d.id());
@@ -113,52 +195,7 @@ pub fn open_window(cx: &mut App, rt: Rc<Runtime>, opts: Table) -> mlua::Result<A
     };
     let handle = cx
         .open_window(options, |window, cx| {
-            cx.new(|cx| {
-                let wh = window.window_handle();
-                let weak: gpui::WeakEntity<LuaWindow> = cx.entity().downgrade();
-                let key_sub = cx.intercept_keystrokes(
-                    move |ev: &KeystrokeEvent, window: &mut Window, cx: &mut App| {
-                        if window.window_handle() != wh {
-                            return;
-                        }
-                        let Some(this) = weak.upgrade() else {
-                            return;
-                        };
-                        if this.update(cx, |this: &mut LuaWindow, cx| this.key(ev, window, cx)) {
-                            cx.stop_propagation();
-                        }
-                    },
-                );
-                let poll = poll_ms.map(|ms| {
-                    cx.spawn(async move |this, cx| {
-                        loop {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(ms.max(16)))
-                                .await;
-                            if this.update(cx, |_, cx| cx.notify()).is_err() {
-                                break;
-                            }
-                        }
-                    })
-                });
-                let title_bar = (!cfg!(target_os = "macos"))
-                    .then(|| cx.new(|cx| PlatformTitleBar::new("lua-window-title-bar", cx)));
-                LuaWindow {
-                    rt,
-                    render_fn,
-                    on_key,
-                    state,
-                    editors: HashMap::default(),
-                    scrolls: HashMap::default(),
-                    initial_focus,
-                    auto_id: 0,
-                    last_error: None,
-                    title_bar,
-                    focus_handle: cx.focus_handle(),
-                    _subscriptions: vec![key_sub],
-                    _poll: poll,
-                }
-            })
+            cx.new(|cx| LuaWindow::new(rt, view_opts, false, window, cx))
         })
         .map_err(mlua::Error::external)?;
     Ok(handle.into())
@@ -170,6 +207,7 @@ pub struct UiHost<'a, 'b> {
     cx: &'a mut Context<'b, LuaWindow>,
     editors: &'a mut HashMap<String, Entity<Editor>>,
     scrolls: &'a mut HashMap<String, ScrollHandle>,
+    in_panel: bool,
 }
 
 impl Host for UiHost<'_, '_> {
@@ -213,6 +251,11 @@ impl Host for UiHost<'_, '_> {
 
     fn spawn(&mut self, cmd: String, callback: mlua::Function) -> Result<()> {
         crate::spawn_command(self.cx, cmd, callback)
+    }
+
+    fn open_path(&mut self, path: String) -> Result<()> {
+        crate::open_path_deferred(self.cx, path);
+        Ok(())
     }
 }
 
@@ -288,7 +331,12 @@ where
         "close",
         scope.create_function(move |_, ()| {
             let mut guard = cell.try_borrow_mut().map_err(|_| busy())?;
-            guard.window.remove_window();
+            // A panel can't close its workspace window; hide its dock instead.
+            if guard.in_panel {
+                crate::dispatch_deferred(guard.cx, "workspace::CloseActiveDock", None).ok();
+            } else {
+                guard.window.remove_window();
+            }
             Ok(())
         })?,
     )?;
@@ -311,6 +359,7 @@ impl LuaWindow {
             cx,
             editors: &mut self.editors,
             scrolls: &mut self.scrolls,
+            in_panel: self.in_panel,
         };
         let cell = RefCell::new(&mut ui);
         rt.with_host(&cell, |scope| {
@@ -607,6 +656,18 @@ impl Render for LuaWindow {
             .clone()
             .map(|e| self.error_element(format!("callback error: {e}"), cx));
         let colors = cx.theme().colors();
+        if self.in_panel {
+            return div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(colors.panel_background)
+                .text_color(colors.text)
+                .track_focus(&self.focus_handle)
+                .child(div().flex().flex_col().flex_1().min_h_0().child(body))
+                .children(error)
+                .into_any_element();
+        }
         client_side_decorations(
             div()
                 .flex()
@@ -621,5 +682,6 @@ impl Render for LuaWindow {
             window,
             cx,
         )
+        .into_any_element()
     }
 }

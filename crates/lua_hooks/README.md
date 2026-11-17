@@ -43,6 +43,12 @@ Debug form), `args`, `src` and `orig`.
 - `ycode.new_action(name, fn)`
 - `ycode.ctor(fn)`
 - `ycode.hooks_dir`: the hooks directory (string).
+- `ycode.open(path)`: open a file in the workspace.
+- `gpui.register_panel{ id, title?, icon?, position?, size?, render, state?, poll_ms?,
+  on_key?, focus? }`: a dock panel rendered like `gpui.open_window` (same elements);
+  `position` is `left` (default), `right` or `bottom`. Toggle it with
+  `["ycode::TogglePanel", { "id": ... }]`; `w.close()` hides the dock. Panels are rebuilt
+  in every workspace on reload.
 - `ycode.workspace_folders()`: folders open in workspace windows, the active window's
   first.
 - `ycode.status_button{ id, action, args?, icon?, label?, tooltip? }`: a button in every
