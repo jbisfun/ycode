@@ -1480,22 +1480,38 @@ mod tests {
 pub fn sync_agent_threads(
     workspace: &mut Workspace,
     agent_id: AgentId,
+    folders: Option<Vec<std::path::PathBuf>>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
     let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() else {
         return;
     };
+    // An empty scope would remove every thread of the agent; that's never what's meant.
+    if folders.as_ref().is_some_and(|f| f.is_empty()) {
+        log::warn!("sync {agent_id} threads: empty `folders`, skipped");
+        return;
+    }
     let fallback = PathList::new(&workspace.root_paths(cx));
     // Resolving connection stores reads every workspace, including this one, which is
     // being updated right now; do it once this action handler has returned.
-    cx.defer(move |cx| sync_agent_threads_in(multi_workspace, agent_id, fallback, cx));
+    cx.defer(move |cx| sync_agent_threads_in(multi_workspace, agent_id, fallback, folders, cx));
+}
+
+/// Is every path of `dirs` one of `folders` or below one?
+fn within(dirs: &PathList, folders: &[std::path::PathBuf]) -> bool {
+    !dirs.paths().is_empty()
+        && dirs
+            .paths()
+            .iter()
+            .all(|p| folders.iter().any(|f| p.starts_with(f)))
 }
 
 fn sync_agent_threads_in(
     multi_workspace: Entity<MultiWorkspace>,
     agent_id: AgentId,
     fallback: PathList,
+    folders: Option<Vec<std::path::PathBuf>>,
     cx: &mut App,
 ) {
     let stores = resolve_agent_connection_stores(&multi_workspace, cx);
@@ -1518,6 +1534,18 @@ fn sync_agent_threads_in(
             ThreadMetadataStore::global(cx).update(cx, |store, cx| {
                 let mut changed = Vec::new();
                 let mut added = 0;
+                let mut removed = 0;
+                if let Some(folders) = &folders {
+                    let outside: Vec<ThreadId> = store
+                        .entries()
+                        .filter(|t| t.agent_id == agent_id && !within(t.folder_paths(), folders))
+                        .map(|t| t.thread_id)
+                        .collect();
+                    removed = outside.len();
+                    for id in outside {
+                        store.delete(id, cx);
+                    }
+                }
                 for SessionByAgent {
                     agent_id,
                     remote_connection,
@@ -1525,6 +1553,14 @@ fn sync_agent_threads_in(
                 } in result.sessions_by_agent
                 {
                     for session in sessions {
+                        if let Some(folders) = &folders
+                            && !session
+                                .work_dirs
+                                .as_ref()
+                                .is_some_and(|dirs| within(dirs, folders))
+                        {
+                            continue;
+                        }
                         if let Some(existing) = store.entry_by_session(&session.session_id) {
                             if existing.agent_id != agent_id {
                                 continue;
@@ -1564,7 +1600,7 @@ fn sync_agent_threads_in(
                     }
                 }
                 log::info!(
-                    "sync {agent_id} threads: {added} added, {} updated",
+                    "sync {agent_id} threads: {added} added, {} updated, {removed} removed",
                     changed.len() - added
                 );
                 if !changed.is_empty() {

@@ -487,6 +487,11 @@ pub struct SyncAgentThreads {
     /// The agent id whose sessions to sync.
     #[serde(deserialize_with = "deserialize_external_agent_id")]
     agent: AgentId,
+    /// Only sessions whose working directory is one of these folders or below it; this
+    /// agent's threads outside them are removed from the sidebar (the sessions stay in
+    /// the agent). All sessions when omitted.
+    #[serde(default)]
+    folders: Option<Vec<std::path::PathBuf>>,
 }
 
 /// Creates a new external agent conversation thread.
@@ -766,7 +771,13 @@ pub fn init(
              action: &SyncAgentThreads,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
-                thread_import::sync_agent_threads(workspace, action.agent.clone(), window, cx);
+                thread_import::sync_agent_threads(
+                    workspace,
+                    action.agent.clone(),
+                    action.folders.clone(),
+                    window,
+                    cx,
+                );
             },
         );
         workspace.register_action(
