@@ -6958,7 +6958,9 @@ impl Window {
         action: &dyn Action,
         cx: &mut App,
     ) {
-        self.dispatch_action_on_node_inner(node_id, action, cx);
+        cx.run_action_interceptor(action, &mut |action, cx| {
+            self.dispatch_action_on_node_inner(node_id, action, cx)
+        });
 
         if !cx.propagate_event
             && cx.cursor_hide_mode == CursorHideMode::OnTypingAndAction

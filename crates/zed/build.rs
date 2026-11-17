@@ -21,6 +21,12 @@ fn main() {
         for dir in &rpath_dirs {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
         }
+
+        // Lua hooks: export the (statically linked) Lua C API so `require` can load
+        // C modules (.so) that expect the host to provide lua_* / luaL_* symbols.
+        for pattern in ["lua_*", "luaL_*", "luaopen_*"] {
+            println!("cargo:rustc-link-arg-bins=-Wl,--export-dynamic-symbol={pattern}");
+        }
     }
 
     if cfg!(target_os = "macos") {

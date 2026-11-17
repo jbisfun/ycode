@@ -1,0 +1,35 @@
+[package]
+name = "lua_hooks"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lua_hooks.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+editor.workspace = true
+gpui.workspace = true
+log.workspace = true
+mlua.workspace = true
+mlua-socket.workspace = true
+# mlua-socket asks for dns-lookup >=2.1 but only builds against 2.x
+dns-lookup = "2.1"
+paths.workspace = true
+platform_title_bar.workspace = true
+release_channel.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+theme.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

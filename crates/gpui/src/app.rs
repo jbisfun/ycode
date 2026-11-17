@@ -457,6 +457,12 @@ fn display_events(
 }
 type Listener = Box<dyn FnMut(&dyn Any, &mut App) -> bool + 'static>;
 type MissingGlyphCallback = Box<dyn FnMut(&[MissingGlyph], &mut App) + 'static>;
+/// Wraps every action dispatch. Receives the action and a continuation that performs the
+/// original dispatch (optionally with a replacement action). Not calling the continuation
+/// swallows the action. See [`App::intercept_actions`].
+pub type ActionInterceptor =
+    Rc<dyn Fn(&dyn Action, &mut dyn FnMut(&dyn Action, &mut App), &mut App)>;
+
 pub(crate) type KeystrokeObserver =
     Box<dyn FnMut(&KeystrokeEvent, &mut Window, &mut App) -> bool + 'static>;
 type QuitHandler = Box<dyn FnOnce(&mut App) -> LocalBoxFuture<'static, ()> + 'static>;
@@ -911,6 +917,7 @@ pub struct App {
     pub(crate) event_listeners: SubscriberSet<EntityId, (TypeId, Listener)>,
     pub(crate) keystroke_observers: SingleSubscriberSet<KeystrokeObserver>,
     pub(crate) keystroke_interceptors: SingleSubscriberSet<KeystrokeObserver>,
+    pub(crate) action_interceptor: Option<ActionInterceptor>,
     pub(crate) keyboard_layout_observers: SingleSubscriberSet<Handler>,
     missing_glyph_callback: Rc<MissingGlyphCallbackSlot>,
     pub(crate) thermal_state_observers: SingleSubscriberSet<Handler>,
@@ -1068,6 +1075,7 @@ impl App {
                 release_listeners: SubscriberSet::new(),
                 keystroke_observers: SingleSubscriberSet::new(),
                 keystroke_interceptors: SingleSubscriberSet::new(),
+                action_interceptor: None,
                 keyboard_layout_observers: SingleSubscriberSet::new(),
                 missing_glyph_callback: Rc::default(),
                 thermal_state_observers: SingleSubscriberSet::new(),
@@ -2836,6 +2844,44 @@ impl App {
             }))
     }
 
+    /// Install a function that wraps every action dispatch, in any window or globally.
+    /// The interceptor is given the action and a continuation that runs the original
+    /// dispatch; it may call it with the same or a different action, or not at all to
+    /// swallow the action. Replaces any previously installed interceptor.
+    pub fn intercept_actions(
+        &mut self,
+        f: impl Fn(&dyn Action, &mut dyn FnMut(&dyn Action, &mut App), &mut App) + 'static,
+    ) {
+        self.action_interceptor = Some(Rc::new(f));
+    }
+
+    /// Run `orig` through the installed action interceptor, if any.
+    /// Returns false if the interceptor swallowed the action.
+    pub(crate) fn run_action_interceptor(
+        &mut self,
+        action: &dyn Action,
+        orig: &mut dyn FnMut(&dyn Action, &mut App),
+    ) -> bool {
+        let Some(interceptor) = self.action_interceptor.clone() else {
+            orig(action, self);
+            return true;
+        };
+        let mut called = false;
+        interceptor(
+            action,
+            &mut |action, cx| {
+                called = true;
+                orig(action, cx)
+            },
+            self,
+        );
+        if !called {
+            // Swallowed: report the action as handled.
+            self.propagate_event = false;
+        }
+        called
+    }
+
     /// Register key bindings.
     pub fn bind_keys(&mut self, bindings: impl IntoIterator<Item = KeyBinding>) {
         self.keymap.borrow_mut().add_bindings(bindings);
@@ -3060,6 +3106,12 @@ impl App {
     }
 
     fn dispatch_global_action(&mut self, action: &dyn Action) {
+        self.run_action_interceptor(action, &mut |action, cx| {
+            cx.dispatch_global_action_inner(action)
+        });
+    }
+
+    fn dispatch_global_action_inner(&mut self, action: &dyn Action) {
         self.propagate_event = true;
 
         if let Some(mut global_listeners) = self

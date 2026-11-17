@@ -798,6 +798,8 @@ fn main() {
         json_schema_store::init(cx);
         miniprofiler_ui::init(*STARTUP_TIME.get().unwrap(), cx);
         which_key::init(cx);
+        // Lua hooks last, so every action is registered before hook files load.
+        lua_hooks::init(cx);
         #[cfg(target_os = "windows")]
         etw_tracing::init(cx);
 

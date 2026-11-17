@@ -158,6 +158,7 @@ language_tools.workspace = true
 languages = { workspace = true, features = ["load-grammars"] }
 line_ending_selector.workspace = true
 lsp_command_selector.workspace = true
+lua_hooks.workspace = true
 log.workspace = true
 lsp_locations.workspace = true
 markdown.workspace = true

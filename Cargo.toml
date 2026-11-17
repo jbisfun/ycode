@@ -93,6 +93,7 @@ members = [
     "crates/git_ui_core",
     "crates/github_releases",
     "crates/go_to_line",
+    "crates/lua_hooks",
     "crates/google_ai",
     "crates/gpui",
     "crates/gpui_apple",
@@ -369,6 +370,7 @@ git_ui = { path = "crates/git_ui" }
 git_ui_core = { path = "crates/git_ui_core" }
 github_releases = { path = "crates/github_releases" }
 go_to_line = { path = "crates/go_to_line" }
+lua_hooks = { path = "crates/lua_hooks" }
 google_ai = { path = "crates/google_ai" }
 gpui = { path = "crates/gpui", default-features = false }
 gpui_apple = { path = "crates/gpui_apple" }
@@ -692,6 +694,8 @@ libwebrtc = "0.3.26"
 linkify = "0.10.0"
 livekit = { version = "0.7.32", features = ["tokio", "rustls-tls-native-roots"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
+mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"] }
+mlua-socket = "0.2"
 lru = "0.16"
 lsp-types = { git = "https://github.com/zed-industries/lsp-types", rev = "82d7fc66ebdfabcfeb26ba16bbed9f3d26211fc3" }
 mach2 = "0.6"

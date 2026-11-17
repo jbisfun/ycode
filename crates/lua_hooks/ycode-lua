@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""ycode-lua: REPL / runner for ycode's live Lua executor.
+
+  ycode-lua                 interactive REPL (multi-line input continues automatically)
+  ycode-lua FILE...         run files (.x.lua directives allowed)
+  ycode-lua -e CODE         run a snippet
+  ycode-lua --tail          print hook logs as they happen
+
+REPL commands: .reload (reload hook files), .log (show pending log), .quit
+"""
+import json, os, socket, sys, time
+
+SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "ycode-lua.sock")
+
+
+class Conn:
+    def __init__(self):
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.s.connect(SOCK)
+        except OSError as e:
+            sys.exit(f"ycode-lua: can't connect to {SOCK} ({e}); is ycode running?")
+        self.f = self.s.makefile("r")
+
+    def send(self, code):
+        self.s.sendall((json.dumps({"code": code}) + "\n").encode())
+        line = self.f.readline()
+        if not line:
+            sys.exit("ycode-lua: connection closed")
+        return json.loads(line)
+
+
+def show(resp):
+    for line in resp.get("log", []):
+        print(f"\033[2m[log] {line}\033[0m")
+    if resp.get("ok"):
+        if resp.get("result"):
+            print(resp["result"])
+        return True
+    print(f"\033[31m{resp.get('error')}\033[0m", file=sys.stderr)
+    return False
+
+
+def incomplete(resp):
+    err = resp.get("error") or ""
+    return not resp.get("ok") and ("<eof>" in err or "missing %end" in err)
+
+
+def repl(conn):
+    try:
+        import readline  # noqa: F401  (history / line editing)
+    except ImportError:
+        pass
+    print(f"ycode Lua executor ({SOCK}). .reload .log .quit")
+    buf = []
+    while True:
+        try:
+            line = input("...> " if buf else "lua> ")
+        except (EOFError, KeyboardInterrupt):
+            if buf:
+                buf = []
+                print()
+                continue
+            print()
+            return
+        if not buf and line.strip() == ".quit":
+            return
+        if not buf and line.strip() == ".log":
+            show(conn.send(""))
+            continue
+        buf.append(line)
+        resp = conn.send("\n".join(buf))
+        if incomplete(resp) and line.strip():
+            continue
+        buf = []
+        show(resp)
+
+
+def main(argv):
+    if not argv:
+        return repl(Conn())
+    conn = Conn()
+    if argv[0] == "--tail":
+        while True:
+            for line in conn.send("").get("log", []):
+                print(line, flush=True)
+            time.sleep(0.3)
+    if argv[0] == "-e":
+        return 0 if show(conn.send(" ".join(argv[1:]))) else 1
+    ok = True
+    for path in argv:
+        with open(path) as f:
+            ok &= show(conn.send(f.read()))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]) or 0)
