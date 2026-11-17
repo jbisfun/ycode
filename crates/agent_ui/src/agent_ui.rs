@@ -478,6 +478,17 @@ pub struct ToggleCommandPattern {
 #[serde(deny_unknown_fields)]
 pub struct NewThread;
 
+/// Lists an external agent's sessions (ACP `session/list`) and shows them as sidebar
+/// threads, adding new ones and refreshing titles of known ones.
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = agent)]
+#[serde(deny_unknown_fields)]
+pub struct SyncAgentThreads {
+    /// The agent id whose sessions to sync.
+    #[serde(deserialize_with = "deserialize_external_agent_id")]
+    agent: AgentId,
+}
+
 /// Creates a new external agent conversation thread.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = agent)]
@@ -750,6 +761,14 @@ pub fn init(
     .detach();
     cx.observe_new(ManageProfilesModal::register).detach();
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             action: &SyncAgentThreads,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                thread_import::sync_agent_threads(workspace, action.agent.clone(), window, cx);
+            },
+        );
         workspace.register_action(
             |workspace: &mut Workspace,
              _: &ImportThreadsFromOtherChannels,

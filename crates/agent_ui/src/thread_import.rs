@@ -26,6 +26,8 @@ use ui::{
 use util::ResultExt;
 use workspace::{ModalView, MultiWorkspace, Workspace};
 
+use util::path_list::PathList;
+
 use crate::{
     Agent, AgentPanel,
     agent_connection_store::AgentConnectionStore,
@@ -1468,4 +1470,108 @@ mod tests {
             assert!(titles.contains("Thread B"));
         });
     }
+}
+
+/// Non-interactive, repeatable import for one agent (`agent::SyncAgentThreads`): lists the
+/// agent's sessions over ACP and makes them sidebar threads. New sessions are added
+/// unarchived, under their working directory if it is an existing absolute path, otherwise
+/// under this workspace's folders. Threads already known get their title and timestamp
+/// refreshed (a user-set title is kept).
+pub fn sync_agent_threads(
+    workspace: &mut Workspace,
+    agent_id: AgentId,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() else {
+        return;
+    };
+    let fallback = PathList::new(&workspace.root_paths(cx));
+    // Resolving connection stores reads every workspace, including this one, which is
+    // being updated right now; do it once this action handler has returned.
+    cx.defer(move |cx| sync_agent_threads_in(multi_workspace, agent_id, fallback, cx));
+}
+
+fn sync_agent_threads_in(
+    multi_workspace: Entity<MultiWorkspace>,
+    agent_id: AgentId,
+    fallback: PathList,
+    cx: &mut App,
+) {
+    let stores = resolve_agent_connection_stores(&multi_workspace, cx);
+    if stores.is_empty() {
+        log::warn!("sync {agent_id} threads: no agent panel yet");
+        return;
+    }
+    let existing: HashSet<acp::SessionId> = ThreadMetadataStore::global(cx)
+        .read(cx)
+        .entries()
+        .filter_map(|metadata| metadata.session_id.clone())
+        .collect();
+    let fetch = fetch_sessions_for_agent(agent_id.clone(), existing, stores, cx);
+    cx.spawn(async move |cx| {
+        let result = fetch.await;
+        if let AgentImportStatus::Error(error) = &result.status {
+            log::warn!("sync {agent_id} threads: {error}");
+        }
+        cx.update(|cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                let mut changed = Vec::new();
+                let mut added = 0;
+                for SessionByAgent {
+                    agent_id,
+                    remote_connection,
+                    sessions,
+                } in result.sessions_by_agent
+                {
+                    for session in sessions {
+                        if let Some(existing) = store.entry_by_session(&session.session_id) {
+                            if existing.agent_id != agent_id {
+                                continue;
+                            }
+                            let title = session.title.clone().or_else(|| existing.title.clone());
+                            let updated_at = session.updated_at.unwrap_or(existing.updated_at);
+                            if title != existing.title || updated_at != existing.updated_at {
+                                changed.push(ThreadMetadata {
+                                    title,
+                                    updated_at,
+                                    ..existing.clone()
+                                });
+                            }
+                            continue;
+                        }
+                        let folders = session
+                            .work_dirs
+                            .filter(|dirs| {
+                                !dirs.paths().is_empty()
+                                    && dirs.paths().iter().all(|p| p.is_absolute() && p.is_dir())
+                            })
+                            .unwrap_or_else(|| fallback.clone());
+                        added += 1;
+                        changed.push(ThreadMetadata {
+                            thread_id: ThreadId::new(),
+                            session_id: Some(session.session_id),
+                            agent_id: agent_id.clone(),
+                            title: session.title,
+                            title_override: None,
+                            updated_at: session.updated_at.unwrap_or_else(Utc::now),
+                            created_at: session.created_at,
+                            interacted_at: None,
+                            worktree_paths: WorktreePaths::from_folder_paths(&folders),
+                            remote_connection: remote_connection.clone(),
+                            archived: false,
+                        });
+                    }
+                }
+                log::info!(
+                    "sync {agent_id} threads: {added} added, {} updated",
+                    changed.len() - added
+                );
+                if !changed.is_empty() {
+                    store.save_all(changed, cx);
+                }
+            });
+        });
+    })
+    .detach();
 }
