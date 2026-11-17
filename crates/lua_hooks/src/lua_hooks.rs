@@ -138,17 +138,33 @@ pub(crate) fn open_path_deferred(cx: &mut App, path: String) {
 /// `ycode.workspace_folders()`: visible worktree roots of every workspace window, the
 /// active window's first, without duplicates.
 pub(crate) fn workspace_folders(cx: &App) -> Vec<String> {
+    workspace_folders_in(None, cx)
+}
+
+/// Like [`workspace_folders`], starting with `current`: the window Lua is running in.
+/// A window being drawn or updated is leased out of `cx.windows()` and can't be read
+/// through its handle, so a panel's own workspace is only reachable this way.
+pub(crate) fn workspace_folders_in(current: Option<&gpui::Window>, cx: &App) -> Vec<String> {
     let mut windows = cx.windows();
     if let Some(active) = cx.active_window() {
         windows.retain(|w| *w != active);
         windows.insert(0, active);
     }
-    let mut folders: Vec<String> = Vec::new();
+    let mut multi: Vec<gpui::Entity<workspace::MultiWorkspace>> = current
+        .and_then(|w| w.root::<workspace::MultiWorkspace>().flatten())
+        .into_iter()
+        .collect();
     for handle in windows {
-        let Some(mw) = handle.downcast::<workspace::MultiWorkspace>() else {
-            continue;
-        };
-        let Ok(mw) = mw.read(cx) else { continue };
+        if let Some(mw) = handle.downcast::<workspace::MultiWorkspace>()
+            && let Ok(entity) = mw.entity(cx)
+            && !multi.contains(&entity)
+        {
+            multi.push(entity);
+        }
+    }
+    let mut folders: Vec<String> = Vec::new();
+    for mw in multi {
+        let mw = mw.read(cx);
         for ws in mw.workspaces() {
             for path in ws.read(cx).root_paths(cx) {
                 let p = path.to_string_lossy().into_owned();
