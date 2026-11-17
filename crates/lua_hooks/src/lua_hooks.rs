@@ -17,6 +17,7 @@ pub mod ui;
 pub use runtime::{Host, Runtime};
 
 use anyhow::Result;
+use command_palette_hooks::{CommandPaletteFilter, GlobalCommandPaletteSource};
 use gpui::{Action, AnyWindowHandle, App, BorrowAppContext as _, Global, actions};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -45,8 +46,6 @@ actions!(
     [
         /// Reloads Lua hook files from the hooks directory.
         ReloadHooks,
-        /// Opens the Lua executor window (the `ycode::Executor` Lua action).
-        OpenExecutor,
     ]
 );
 
@@ -87,6 +86,9 @@ pub(crate) fn action_names(cx: &App) -> Vec<String> {
 /// Apply the merged `ycode.settings` layer after the current update.
 pub(crate) fn set_plugin_settings_deferred(cx: &mut App, settings: Json) {
     cx.defer(move |cx| {
+        if !cx.has_global::<SettingsStore>() {
+            return;
+        }
         let content = settings.to_string();
         cx.update_global(|store: &mut SettingsStore, cx| {
             if let Err(e) = store.set_plugin_settings(&content, cx) {
@@ -94,6 +96,57 @@ pub(crate) fn set_plugin_settings_deferred(cx: &mut App, settings: Json) {
             }
         });
     });
+}
+
+/// `ycode.kv_get`: read from the app's key-value store (where dismissed banners live).
+pub(crate) fn kv_get(cx: &App, key: &str) -> Result<Option<String>> {
+    db::kvp::KeyValueStore::global(cx).read_kvp(key)
+}
+
+/// `ycode.kv_set`: write synchronously, so code reading the key right after sees it.
+pub(crate) fn kv_set(cx: &App, key: &str, value: Option<String>) -> Result<()> {
+    let store = db::kvp::KeyValueStore::global(cx);
+    let key = key.to_string();
+    gpui::block_on(async move {
+        match value {
+            Some(v) => store.write_kvp(key, v).await,
+            None => store.delete_kvp(key).await,
+        }
+    })
+}
+
+/// Namespaces hidden from the command palette by Lua; shown again on reload.
+#[derive(Default)]
+struct HiddenNamespaces(Vec<&'static str>);
+impl Global for HiddenNamespaces {}
+
+pub(crate) fn palette_hide(cx: &mut App, namespace: &str) -> Result<()> {
+    let hidden = cx.default_global::<HiddenNamespaces>();
+    let ns: &'static str = match hidden.0.iter().find(|n| **n == namespace) {
+        Some(n) => n,
+        // Leaked once per distinct namespace; the filter only takes &'static str.
+        None => {
+            let n: &'static str = Box::leak(namespace.to_string().into_boxed_str());
+            hidden.0.push(n);
+            n
+        }
+    };
+    CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_namespace(ns));
+    Ok(())
+}
+
+fn palette_reset(cx: &mut App) {
+    let hidden: Vec<&'static str> = cx.default_global::<HiddenNamespaces>().0.clone();
+    CommandPaletteFilter::update_global(cx, |filter, _| {
+        for ns in hidden {
+            filter.show_namespace(ns);
+        }
+    });
+}
+
+/// `module::Name` -> `module: name`, like the command palette shows registered actions.
+fn humanize(name: &str) -> String {
+    command_palette::humanize_action_name(name)
 }
 
 /// Open a Lua window after the current update (Lua may be running inside another window).
@@ -152,6 +205,18 @@ impl Host for ActionHost<'_> {
         set_plugin_settings_deferred(self.cx, settings);
         Ok(())
     }
+
+    fn kv_get(&mut self, key: &str) -> Result<Option<String>> {
+        kv_get(self.cx, key)
+    }
+
+    fn kv_set(&mut self, key: &str, value: Option<String>) -> Result<()> {
+        kv_set(self.cx, key, value)
+    }
+
+    fn palette_hide(&mut self, namespace: &str) -> Result<()> {
+        palette_hide(self.cx, namespace)
+    }
 }
 
 /// [`Host`] for a Rust-side hook point (see [`call_point`]).
@@ -183,6 +248,18 @@ impl Host for PointHost<'_> {
     fn set_settings(&mut self, settings: Json) -> Result<()> {
         set_plugin_settings_deferred(self.cx, settings);
         Ok(())
+    }
+
+    fn kv_get(&mut self, key: &str) -> Result<Option<String>> {
+        kv_get(self.cx, key)
+    }
+
+    fn kv_set(&mut self, key: &str, value: Option<String>) -> Result<()> {
+        kv_set(self.cx, key, value)
+    }
+
+    fn palette_hide(&mut self, namespace: &str) -> Result<()> {
+        palette_hide(self.cx, namespace)
     }
 }
 
@@ -221,6 +298,8 @@ pub fn call_point(
 pub fn init(cx: &mut App) {
     let hooks = LuaHooks::default();
     cx.set_global(hooks.clone());
+    // Tests install their own runtime instead of the user's hooks directory.
+    #[cfg(not(test))]
     load(cx);
 
     cx.intercept_actions(move |action, orig, cx| {
@@ -262,13 +341,21 @@ pub fn init(cx: &mut App) {
     });
 
     cx.on_action(|_: &ReloadHooks, cx| load(cx));
-    cx.on_action(|_: &OpenExecutor, cx| {
-        cx.defer(|cx| {
-            cx.dispatch_action(&Run {
-                name: "ycode::Executor".into(),
-                args: None,
+    // `%new` actions show up in the command palette like registered ones.
+    GlobalCommandPaletteSource::set(cx, |cx| {
+        let Some(rt) = LuaHooks::runtime(cx) else {
+            return Vec::new();
+        };
+        rt.new_actions()
+            .into_iter()
+            .map(|name| {
+                let action: Box<dyn Action> = Box::new(Run {
+                    name: name.clone(),
+                    args: None,
+                });
+                (humanize(&name), action)
             })
-        })
+            .collect()
     });
 
     #[cfg(all(unix, not(test)))]
@@ -407,7 +494,8 @@ fn load(cx: &mut App) {
 
 /// Run pending `%ctor`s and make `rt` the active runtime. Returns all errors.
 pub fn install(cx: &mut App, rt: Runtime, mut errors: Vec<String>) -> Vec<String> {
-    // The plugin settings layer belongs to the runtime being replaced.
+    // Palette filters and the plugin settings layer belong to the runtime being replaced.
+    palette_reset(cx);
     if cx.has_global::<SettingsStore>() {
         cx.update_global(|store: &mut SettingsStore, cx| store.set_plugin_settings("", cx))
             .ok();

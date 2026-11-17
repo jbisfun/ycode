@@ -194,6 +194,18 @@ impl Host for UiHost<'_, '_> {
         crate::set_plugin_settings_deferred(self.cx, settings);
         Ok(())
     }
+
+    fn kv_get(&mut self, key: &str) -> Result<Option<String>> {
+        crate::kv_get(self.cx, key)
+    }
+
+    fn kv_set(&mut self, key: &str, value: Option<String>) -> Result<()> {
+        crate::kv_set(self.cx, key, value)
+    }
+
+    fn palette_hide(&mut self, namespace: &str) -> Result<()> {
+        crate::palette_hide(self.cx, namespace)
+    }
 }
 
 /// The `w` table handed to window callbacks.

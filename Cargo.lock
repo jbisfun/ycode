@@ -10461,6 +10461,9 @@ name = "lua_hooks"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "command_palette",
+ "command_palette_hooks",
+ "db",
  "dns-lookup",
  "editor",
  "gpui",

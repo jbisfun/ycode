@@ -22,6 +22,17 @@ pub trait Host {
     fn open_window(&mut self, _opts: Table) -> Result<()> {
         anyhow::bail!("gpui.open_window is not available here")
     }
+    /// Persistent key-value store (the app database). `None` deletes.
+    fn kv_get(&mut self, _key: &str) -> Result<Option<String>> {
+        anyhow::bail!("ycode.kv is not available here")
+    }
+    fn kv_set(&mut self, _key: &str, _value: Option<String>) -> Result<()> {
+        anyhow::bail!("ycode.kv is not available here")
+    }
+    /// Hide every action in `namespace` from the command palette.
+    fn palette_hide(&mut self, _namespace: &str) -> Result<()> {
+        anyhow::bail!("ycode.palette_hide is not available here")
+    }
     /// Replace the plugin settings layer with `settings` (all `ycode.settings` calls merged).
     fn set_settings(&mut self, _settings: Json) -> Result<()> {
         anyhow::bail!("ycode.settings is not available here")
@@ -166,6 +177,9 @@ impl Runtime {
             (&ycode, "actions"),
             (&ycode, "eval"),
             (&ycode, "settings"),
+            (&ycode, "kv_get"),
+            (&ycode, "kv_set"),
+            (&ycode, "palette_hide"),
             (&gpui, "open_window"),
         ] {
             let msg = format!("{name} is only available inside a hook, %ctor or window callback");
@@ -360,6 +374,21 @@ impl Runtime {
             .any(|h| h.is_new && h.name == name)
     }
 
+    /// Names of active `%new` actions (for the command palette).
+    pub fn new_actions(&self) -> Vec<String> {
+        self.refresh();
+        let mut names: Vec<String> = self
+            .index
+            .borrow()
+            .iter()
+            .filter(|h| h.is_new)
+            .map(|h| h.name.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     pub fn active_hooks(&self) -> Vec<(String, String)> {
         self.refresh();
         self.index
@@ -449,6 +478,34 @@ impl Runtime {
         let prev_actions: Value = ycode.get("actions")?;
         let prev_eval: Value = ycode.get("eval")?;
         let prev_settings: Value = ycode.get("settings")?;
+        let prev_kv_get: Value = ycode.get("kv_get")?;
+        let prev_kv_set: Value = ycode.get("kv_set")?;
+        let prev_palette_hide: Value = ycode.get("palette_hide")?;
+        let busy = |what: &'static str| move |_| mlua::Error::runtime(format!("{what}: host busy"));
+        ycode.set(
+            "kv_get",
+            scope.create_function(move |_, key: String| {
+                let mut host = host.try_borrow_mut().map_err(busy("ycode.kv_get"))?;
+                host.kv_get(&key).map_err(mlua::Error::external)
+            })?,
+        )?;
+        ycode.set(
+            "kv_set",
+            scope.create_function(move |_, (key, value): (String, Option<String>)| {
+                let mut host = host.try_borrow_mut().map_err(busy("ycode.kv_set"))?;
+                host.kv_set(&key, value).map_err(mlua::Error::external)
+            })?,
+        )?;
+        ycode.set(
+            "palette_hide",
+            scope.create_function(move |_, namespaces: mlua::Variadic<String>| {
+                let mut host = host.try_borrow_mut().map_err(busy("ycode.palette_hide"))?;
+                for ns in namespaces {
+                    host.palette_hide(&ns).map_err(mlua::Error::external)?;
+                }
+                Ok(())
+            })?,
+        )?;
         ycode.set(
             "settings",
             scope.create_function(move |lua, patch: Value| {
@@ -515,6 +572,9 @@ impl Runtime {
         ycode.set("actions", prev_actions)?;
         ycode.set("eval", prev_eval)?;
         ycode.set("settings", prev_settings)?;
+        ycode.set("kv_get", prev_kv_get)?;
+        ycode.set("kv_set", prev_kv_set)?;
+        ycode.set("palette_hide", prev_palette_hide)?;
         gpui.set("open_window", prev_open)?;
         result
     }

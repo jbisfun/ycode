@@ -1,5 +1,5 @@
 -- The Lua executor window, written in Lua on top of gpui.open_window.
--- Open it with "ycode: open executor" (ycode::OpenExecutor) or
+-- Open it from the command palette ("ycode: executor") or bind
 -- ["ycode::Run", { "name": "ycode::Executor" }].
 --
 -- ctrl-enter runs the input; ctrl-up / ctrl-down walk history. Input can be plain Lua or
@@ -90,7 +90,7 @@ local function render(w)
                 { "button", "Clear", on_click = function(w) w.state.lines = {} end },
                 { "button", "Reload hooks", on_click = function()
                     ycode.dispatch("ycode::ReloadHooks")
-                    ycode.dispatch("ycode::OpenExecutor")
+                    ycode.dispatch("ycode::Executor")
                 end },
                 { "row", grow = true },
                 { "text", #w.state.history .. " in history", fg = "muted", size = 12 },

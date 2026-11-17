@@ -113,6 +113,30 @@ pub struct CommandInterceptResult {
     pub exclusive: bool,
 }
 
+/// Extra commands for the command palette that are not plain registered actions
+/// (e.g. actions defined at runtime by plugins): `(display name, action)` pairs.
+#[derive(Clone)]
+pub struct GlobalCommandPaletteSource(Rc<dyn Fn(&App) -> Vec<(String, Box<dyn gpui::Action>)>>);
+
+impl Global for GlobalCommandPaletteSource {}
+
+impl GlobalCommandPaletteSource {
+    /// Sets the global source, replacing any previous one.
+    pub fn set(
+        cx: &mut App,
+        source: impl Fn(&App) -> Vec<(String, Box<dyn gpui::Action>)> + 'static,
+    ) {
+        cx.set_global(Self(Rc::new(source)));
+    }
+
+    /// Commands from the source, if one is set.
+    pub fn commands(cx: &App) -> Vec<(String, Box<dyn gpui::Action>)> {
+        cx.try_global::<Self>()
+            .map(|source| (source.0.clone())(cx))
+            .unwrap_or_default()
+    }
+}
+
 /// An interceptor for the command palette.
 #[derive(Clone)]
 pub struct GlobalCommandPaletteInterceptor(
