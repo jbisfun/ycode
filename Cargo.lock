@@ -10472,6 +10472,7 @@ dependencies = [
  "mlua-socket",
  "paths",
  "platform_title_bar",
+ "project",
  "release_channel",
  "schemars 1.0.4",
  "serde",

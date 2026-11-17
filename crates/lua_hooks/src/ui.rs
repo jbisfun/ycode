@@ -224,7 +224,7 @@ impl Host for UiHost<'_, '_> {
     }
 
     fn workspace_folders(&self) -> Vec<String> {
-        crate::workspace_folders_in(Some(self.window), self.cx)
+        crate::workspace_folders(self.cx)
     }
 
     fn open_window(&mut self, opts: Table) -> Result<()> {

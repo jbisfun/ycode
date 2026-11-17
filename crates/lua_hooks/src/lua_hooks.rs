@@ -135,42 +135,69 @@ pub(crate) fn open_path_deferred(cx: &mut App, path: String) {
     });
 }
 
-/// `ycode.workspace_folders()`: visible worktree roots of every workspace window, the
-/// active window's first, without duplicates.
-pub(crate) fn workspace_folders(cx: &App) -> Vec<String> {
-    workspace_folders_in(None, cx)
+/// Folders of every workspace, kept up to date from project events. Reading windows on
+/// demand fails for any window that is being updated or drawn at that moment (it is leased
+/// out of `cx.windows()`), which is exactly where Lua runs from actions and panels.
+#[derive(Default)]
+struct WorkspaceFolders(Vec<(gpui::EntityId, AnyWindowHandle, Vec<String>)>);
+impl Global for WorkspaceFolders {}
+
+fn track_workspace_folders(cx: &mut App) {
+    fn record(
+        ws: &workspace::Workspace,
+        window: AnyWindowHandle,
+        cx: &mut gpui::Context<workspace::Workspace>,
+    ) {
+        let id = cx.entity().entity_id();
+        let folders: Vec<String> = ws
+            .root_paths(cx)
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let all = &mut cx.default_global::<WorkspaceFolders>().0;
+        all.retain(|(i, _, _)| *i != id);
+        all.push((id, window, folders));
+    }
+    cx.observe_new(|ws: &mut workspace::Workspace, window, cx| {
+        let Some(window) = window else { return };
+        let handle = window.window_handle();
+        record(ws, handle, cx);
+        let project = ws.project().clone();
+        cx.subscribe(&project, move |ws, _, event, cx| {
+            if matches!(
+                event,
+                project::Event::WorktreeAdded(_) | project::Event::WorktreeRemoved(_)
+            ) {
+                record(ws, handle, cx);
+            }
+        })
+        .detach();
+        let id = cx.entity().entity_id();
+        cx.on_release(move |_, cx| {
+            cx.default_global::<WorkspaceFolders>()
+                .0
+                .retain(|(i, _, _)| *i != id);
+        })
+        .detach();
+    })
+    .detach();
 }
 
-/// Like [`workspace_folders`], starting with `current`: the window Lua is running in.
-/// A window being drawn or updated is leased out of `cx.windows()` and can't be read
-/// through its handle, so a panel's own workspace is only reachable this way.
-pub(crate) fn workspace_folders_in(current: Option<&gpui::Window>, cx: &App) -> Vec<String> {
-    let mut windows = cx.windows();
-    if let Some(active) = cx.active_window() {
-        windows.retain(|w| *w != active);
-        windows.insert(0, active);
-    }
-    let mut multi: Vec<gpui::Entity<workspace::MultiWorkspace>> = current
-        .and_then(|w| w.root::<workspace::MultiWorkspace>().flatten())
-        .into_iter()
-        .collect();
-    for handle in windows {
-        if let Some(mw) = handle.downcast::<workspace::MultiWorkspace>()
-            && let Ok(entity) = mw.entity(cx)
-            && !multi.contains(&entity)
-        {
-            multi.push(entity);
-        }
-    }
+/// `ycode.workspace_folders()`: folders open in workspaces, the active window's first,
+/// without duplicates.
+pub(crate) fn workspace_folders(cx: &App) -> Vec<String> {
+    let Some(all) = cx.try_global::<WorkspaceFolders>() else {
+        return Vec::new();
+    };
+    let active = cx.active_window();
+    let mut entries: Vec<_> = all.0.iter().collect();
+    // Stable: the active window's workspaces first, otherwise in creation order.
+    entries.sort_by_key(|(_, w, _)| Some(*w) != active);
     let mut folders: Vec<String> = Vec::new();
-    for mw in multi {
-        let mw = mw.read(cx);
-        for ws in mw.workspaces() {
-            for path in ws.read(cx).root_paths(cx) {
-                let p = path.to_string_lossy().into_owned();
-                if !folders.contains(&p) {
-                    folders.push(p);
-                }
+    for (_, _, paths) in entries {
+        for p in paths {
+            if !folders.contains(p) {
+                folders.push(p.clone());
             }
         }
     }
@@ -521,6 +548,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &ReloadHooks, cx| load(cx));
     status::init(cx);
     panel::init(cx);
+    track_workspace_folders(cx);
     // `%new` actions show up in the command palette like registered ones.
     GlobalCommandPaletteSource::set(cx, |cx| {
         let Some(rt) = LuaHooks::runtime(cx) else {
