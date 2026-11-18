@@ -244,7 +244,10 @@ impl LuaWindow {
             .or_insert_with(|| {
                 cx.new(|cx| {
                     let mut e = if multiline {
-                        Editor::multi_line(window, cx)
+                        let mut e = Editor::multi_line(window, cx);
+                        // A text box, not a code editor: no line numbers.
+                        e.set_show_gutter(false, cx);
+                        e
                     } else {
                         Editor::single_line(window, cx)
                     };

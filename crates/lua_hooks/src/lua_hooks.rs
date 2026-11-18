@@ -20,7 +20,8 @@ pub use runtime::{Host, Runtime};
 
 use anyhow::Result;
 use command_palette_hooks::{CommandPaletteFilter, GlobalCommandPaletteSource};
-use gpui::{Action, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Global, actions};
+use mlua::IntoLuaMulti as _;
+use gpui::{Action, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Global, TaskExt as _, actions};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value as Json;
@@ -105,34 +106,137 @@ pub(crate) fn dispatch_deferred(cx: &mut App, name: &str, args: Option<Json>) ->
     Ok(())
 }
 
-/// `ycode.open(path)`: open a file in the active (or first) workspace window.
-pub(crate) fn open_path_deferred(cx: &mut App, path: String) {
+/// The workspace windows, the active one first.
+fn workspace_windows(cx: &App) -> Vec<gpui::WindowHandle<workspace::MultiWorkspace>> {
+    let mut windows = cx.windows();
+    if let Some(active) = cx.active_window() {
+        windows.retain(|w| *w != active);
+        windows.insert(0, active);
+    }
+    windows
+        .into_iter()
+        .filter_map(|w| w.downcast::<workspace::MultiWorkspace>())
+        .collect()
+}
+
+/// `ycode.open(path, line)`: open a file in the active (or first) workspace window,
+/// with the cursor on `line` (1-based) when given.
+pub(crate) fn open_path_deferred(cx: &mut App, path: String, line: Option<u32>) {
     cx.defer(move |cx| {
-        let mut windows = cx.windows();
-        if let Some(active) = cx.active_window() {
-            windows.retain(|w| *w != active);
-            windows.insert(0, active);
-        }
-        let Some(mw) = windows
-            .into_iter()
-            .find_map(|w| w.downcast::<workspace::MultiWorkspace>())
-        else {
+        let Some(mw) = workspace_windows(cx).into_iter().next() else {
             log::warn!(target: "lua_hooks", "ycode.open: no workspace window");
             return;
         };
         mw.update(cx, |mw, window, cx| {
             mw.workspace().update(cx, |ws, cx| {
-                ws.open_abs_path(
+                let open = ws.open_abs_path(
                     PathBuf::from(&path),
                     workspace::OpenOptions::default(),
                     window,
                     cx,
-                )
-                .detach();
+                );
+                cx.spawn_in(window, async move |_, cx| {
+                    let item = open.await?;
+                    if let (Some(line), Some(editor)) = (line, item.downcast::<editor::Editor>()) {
+                        let point = text::Point::new(line.saturating_sub(1), 0);
+                        editor.update_in(cx, |editor, window, cx| {
+                            editor.go_to_singleton_buffer_point(point, window, cx)
+                        })?;
+                    }
+                    anyhow::Ok(())
+                })
+                .detach_and_log_err(&*cx);
             });
         })
         .ok();
     });
+}
+
+/// The active editor's file and selection.
+struct Selection {
+    path: String,
+    line: u32,
+    end_line: u32,
+    text: String,
+}
+
+fn active_selection(cx: &mut App) -> Option<Selection> {
+    let mw = workspace_windows(cx).into_iter().next()?;
+    let ws = mw.read(cx).ok()?.workspace().clone();
+    let editor = ws.read(cx).active_item(cx)?.downcast::<editor::Editor>()?;
+    editor.update(cx, |editor, cx| {
+        let snapshot = editor.display_snapshot(cx);
+        let sel = editor.selections.newest::<text::Point>(&snapshot);
+        let buffer = editor.buffer().read(cx).as_singleton()?;
+        let buffer = buffer.read(cx);
+        let path = language::File::as_local(buffer.file()?.as_ref())?.abs_path(cx);
+        let text: String = buffer.text_for_range(sel.start..sel.end).collect();
+        // A selection ending at column 0 of the next line covers only the lines above.
+        let end_row = if sel.end.column == 0 && sel.end.row > sel.start.row {
+            sel.end.row - 1
+        } else {
+            sel.end.row
+        };
+        Some(Selection {
+            path: path.to_string_lossy().into_owned(),
+            line: sel.start.row + 1,
+            end_line: end_row + 1,
+            text,
+        })
+    })
+}
+
+/// `ycode.selection(callback)`: read the active editor's selection once nothing is
+/// being updated (windows can't be read while they are), then call back.
+pub(crate) fn selection_deferred(cx: &mut App, callback: mlua::Function) {
+    let Some(rt) = LuaHooks::runtime(cx) else {
+        return;
+    };
+    let weak = Rc::downgrade(&rt);
+    cx.defer(move |cx| {
+        let selection = active_selection(cx);
+        call_back(cx, &weak, &callback, |lua| {
+            let Some(s) = selection else {
+                return Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Nil]));
+            };
+            let t = lua.create_table()?;
+            t.set("path", s.path)?;
+            t.set("line", s.line)?;
+            t.set("end_line", s.end_line)?;
+            t.set("text", s.text)?;
+            Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Table(t)]))
+        });
+    });
+}
+
+/// Call a Lua callback from outside any hook (spawn/selection results) with a host,
+/// then run any ctors it registered. Dropped if the runtime it came from was
+/// replaced by a reload in the meantime.
+fn call_back(
+    cx: &mut App,
+    from: &std::rc::Weak<Runtime>,
+    callback: &mlua::Function,
+    args: impl FnOnce(&mlua::Lua) -> mlua::Result<mlua::MultiValue>,
+) {
+    let (Some(rt), Some(current)) = (from.upgrade(), LuaHooks::runtime(cx)) else {
+        return;
+    };
+    if !Rc::ptr_eq(&rt, &current) {
+        return;
+    }
+    let mut host = ActionHost {
+        cx,
+        action: None,
+        orig: None,
+    };
+    let cell = RefCell::new(&mut host);
+    if let Err(e) = rt.with_host(&cell, |_| callback.call::<()>(args(rt.lua())?)) {
+        log::error!(target: "lua_hooks", "callback: {e}");
+    }
+    drop(cell);
+    for e in rt.run_ctors(&mut host) {
+        log::error!(target: "lua_hooks", "{e}");
+    }
 }
 
 /// Folders of every workspace, kept up to date from project events. Reading windows on
@@ -294,12 +398,6 @@ pub(crate) fn spawn_command(cx: &mut App, cmd: String, callback: mlua::Function)
     cx.spawn(async move |cx| {
         let output = job.await;
         cx.update(|cx| {
-            let (Some(rt), Some(current)) = (weak.upgrade(), LuaHooks::runtime(cx)) else {
-                return;
-            };
-            if !Rc::ptr_eq(&rt, &current) {
-                return;
-            }
             let (ok, text, code) = match output {
                 Ok(o) => {
                     let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -308,20 +406,7 @@ pub(crate) fn spawn_command(cx: &mut App, cmd: String, callback: mlua::Function)
                 }
                 Err(e) => (false, e.to_string(), -1),
             };
-            let mut host = ActionHost {
-                cx,
-                action: None,
-                orig: None,
-            };
-            let cell = RefCell::new(&mut host);
-            if let Err(e) = rt.with_host(&cell, |_| callback.call::<()>((ok, text, code))) {
-                log::error!(target: "lua_hooks", "ycode.spawn callback: {e}");
-            }
-            drop(cell);
-            let errors = rt.run_ctors(&mut host);
-            for e in errors {
-                log::error!(target: "lua_hooks", "{e}");
-            }
+            call_back(cx, &weak, &callback, |lua| (ok, text, code).into_lua_multi(lua));
         });
     })
     .detach();
@@ -379,8 +464,13 @@ impl Host for ActionHost<'_> {
         workspace_folders(self.cx)
     }
 
-    fn open_path(&mut self, path: String) -> Result<()> {
-        open_path_deferred(self.cx, path);
+    fn open_path(&mut self, path: String, line: Option<u32>) -> Result<()> {
+        open_path_deferred(self.cx, path, line);
+        Ok(())
+    }
+
+    fn selection(&mut self, callback: mlua::Function) -> Result<()> {
+        selection_deferred(self.cx, callback);
         Ok(())
     }
 
@@ -436,8 +526,13 @@ impl Host for PointHost<'_> {
         workspace_folders(self.cx)
     }
 
-    fn open_path(&mut self, path: String) -> Result<()> {
-        open_path_deferred(self.cx, path);
+    fn open_path(&mut self, path: String, line: Option<u32>) -> Result<()> {
+        open_path_deferred(self.cx, path, line);
+        Ok(())
+    }
+
+    fn selection(&mut self, callback: mlua::Function) -> Result<()> {
+        selection_deferred(self.cx, callback);
         Ok(())
     }
 

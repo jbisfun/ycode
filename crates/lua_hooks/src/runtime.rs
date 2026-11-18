@@ -45,9 +45,14 @@ pub trait Host {
     fn workspace_folders(&self) -> Vec<String> {
         Vec::new()
     }
-    /// Open a file in the workspace (editor tab).
-    fn open_path(&mut self, _path: String) -> Result<()> {
+    /// Open a file in the workspace (editor tab), at `line` (1-based) if given.
+    fn open_path(&mut self, _path: String, _line: Option<u32>) -> Result<()> {
         anyhow::bail!("ycode.open is not available here")
+    }
+    /// Call `callback(sel)` soon with the active editor's selection
+    /// (`{ path, line, end_line, text }`), or nil without a file editor.
+    fn selection(&mut self, _callback: Function) -> Result<()> {
+        anyhow::bail!("ycode.selection is not available here")
     }
 }
 
@@ -256,6 +261,7 @@ impl Runtime {
             (&ycode, "kv_set"),
             (&ycode, "palette_hide"),
             (&ycode, "spawn"),
+            (&ycode, "selection"),
             (&gpui, "open_window"),
         ] {
             let msg = format!("{name} is only available inside a hook, %ctor or window callback");
@@ -576,13 +582,23 @@ impl Runtime {
         let prev_spawn: Value = ycode.get("spawn")?;
         let prev_folders: Value = ycode.get("workspace_folders")?;
         let prev_open_path: Value = ycode.get("open")?;
+        let prev_selection: Value = ycode.get("selection")?;
         ycode.set(
             "open",
-            scope.create_function(move |_, path: String| {
+            scope.create_function(move |_, (path, line): (String, Option<u32>)| {
                 let mut host = host
                     .try_borrow_mut()
                     .map_err(|_| mlua::Error::runtime("ycode.open: host busy"))?;
-                host.open_path(path).map_err(mlua::Error::external)
+                host.open_path(path, line).map_err(mlua::Error::external)
+            })?,
+        )?;
+        ycode.set(
+            "selection",
+            scope.create_function(move |_, callback: Function| {
+                let mut host = host
+                    .try_borrow_mut()
+                    .map_err(|_| mlua::Error::runtime("ycode.selection: host busy"))?;
+                host.selection(callback).map_err(mlua::Error::external)
             })?,
         )?;
         ycode.set(
@@ -698,6 +714,7 @@ impl Runtime {
         ycode.set("spawn", prev_spawn)?;
         ycode.set("workspace_folders", prev_folders)?;
         ycode.set("open", prev_open_path)?;
+        ycode.set("selection", prev_selection)?;
         gpui.set("open_window", prev_open)?;
         result
     }

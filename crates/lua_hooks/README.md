@@ -43,7 +43,13 @@ Debug form), `args`, `src` and `orig`.
 - `ycode.new_action(name, fn)`
 - `ycode.ctor(fn)`
 - `ycode.hooks_dir`: the hooks directory (string).
-- `ycode.open(path)`: open a file in the workspace.
+- `ycode.open(path, line?)`: open a file in the workspace, with the cursor on `line`
+  (1-based) when given.
+- `ycode.selection(fn(sel))`: calls back with the active editor's selection,
+  `{ path, line, end_line, text }` (absolute path, 1-based lines), or nil when no file
+  editor is active.
+- `gpui.open_window{ ..., kind? }`: `kind = "floating"` keeps a small window above the
+  focused one instead of tiling it; `"dialog"` makes it modal.
 - `gpui.register_panel{ id, title?, icon?, position?, size?, render, state?, poll_ms?,
   on_key?, focus? }`: a dock panel rendered like `gpui.open_window` (same elements);
   `position` is `left` (default), `right` or `bottom`. Toggle it with

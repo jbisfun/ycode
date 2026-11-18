@@ -28,6 +28,9 @@ pub struct LuaPanel {
     icon: Option<IconName>,
     position: DockPosition,
     size: Pixels,
+    /// Docks require a distinct activation priority per panel (status bar order);
+    /// Lua panels take 1000 + their registration order, above every native panel.
+    priority: u32,
     view: Entity<LuaWindow>,
 }
 
@@ -81,7 +84,7 @@ fn sync_workspace(workspace: &mut Workspace, window: &mut Window, cx: &mut Conte
         return;
     };
     let mut added = Vec::new();
-    for (id, opts) in rt.panels() {
+    for (index, (id, opts)) in rt.panels().into_iter().enumerate() {
         let view_opts = match ViewOpts::parse(&rt, &opts, "gpui.register_panel") {
             Ok(o) => o,
             Err(e) => {
@@ -112,6 +115,7 @@ fn sync_workspace(workspace: &mut Workspace, window: &mut Window, cx: &mut Conte
                 icon,
                 position,
                 size,
+                priority: 1000 + index as u32,
                 view,
             }
         });
@@ -212,6 +216,6 @@ impl Panel for LuaPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        20
+        self.priority
     }
 }

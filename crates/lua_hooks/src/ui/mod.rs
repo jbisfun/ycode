@@ -55,6 +55,10 @@
 //! - `icon{ name, size, color }`, `checkbox{ checked = true|false|"mixed", label, size,
 //!   disabled, on_click }`, `toggle_group{ options, selected, on_select = fn(w, opt) }`,
 //!   `disclosure{ open, on_click }`.
+//!
+//! `gpui.open_window` also takes `kind = "floating"` (stays above the focused window,
+//! not tiled) or `"dialog"` (modal), besides `title width height state focus poll_ms
+//! on_key render`.
 //! - `input{ id, placeholder, multiline }`: read/write with `w.text(id)`/`w.set_text`.
 //!
 //! Inside callbacks, `w` has `state`, `text(id)`, `set_text(id, s)`, `focus(id)`,
@@ -203,6 +207,18 @@ pub fn open_window(cx: &mut App, rt: Rc<Runtime>, opts: Table) -> mlua::Result<A
     let width: f32 = opts.get::<Option<f32>>("width")?.unwrap_or(720.);
     let height: f32 = opts.get::<Option<f32>>("height")?.unwrap_or(480.);
     let view_opts = ViewOpts::parse(&rt, &opts, "gpui.open_window")?;
+    // `kind = "floating"` keeps a small window (a prompt, a note box) above the
+    // focused window instead of being tiled like a normal one.
+    let kind = match opts.get::<Option<String>>("kind")?.as_deref() {
+        None | Some("normal") => WindowKind::Normal,
+        Some("floating") => WindowKind::Floating,
+        Some("dialog") => WindowKind::Dialog,
+        Some(other) => {
+            return Err(rt_err(format!(
+                "gpui.open_window: bad kind {other:?}, expected normal|floating|dialog"
+            )));
+        }
+    };
 
     let size = gpui::size(px(width), px(height));
     let display_id = cx.active_display().map(|d| d.id());
@@ -215,7 +231,7 @@ pub fn open_window(cx: &mut App, rt: Rc<Runtime>, opts: Table) -> mlua::Result<A
         focus: true,
         show: true,
         is_movable: true,
-        kind: WindowKind::Normal,
+        kind,
         window_background: cx.theme().window_background_appearance(),
         app_id: Some(ReleaseChannel::global(cx).app_id().to_owned()),
         window_decorations: Some(WindowDecorations::Client),
@@ -284,8 +300,13 @@ impl Host for UiHost<'_, '_> {
         crate::spawn_command(self.cx, cmd, callback)
     }
 
-    fn open_path(&mut self, path: String) -> Result<()> {
-        crate::open_path_deferred(self.cx, path);
+    fn open_path(&mut self, path: String, line: Option<u32>) -> Result<()> {
+        crate::open_path_deferred(self.cx, path, line);
+        Ok(())
+    }
+
+    fn selection(&mut self, callback: mlua::Function) -> Result<()> {
+        crate::selection_deferred(self.cx, callback);
         Ok(())
     }
 }
