@@ -74,7 +74,7 @@ local function render(w)
         w.scroll_bottom("output")
     end
 
-    local output = { "col", id = "output", scroll = true, grow = true, p = 10, gap = 2, mono = true, size = 13 }
+    local output = { "col", id = "output", scroll = true, grow = true, p = 10, gap = 2, mono = true, size = "small" }
     for _, line in ipairs(w.state.lines) do
         local k = kinds[line.kind]
         output[#output + 1] = { "text", k.prefix .. line.text, fg = k.fg }
@@ -93,7 +93,7 @@ local function render(w)
                     ycode.dispatch("ycode::Executor")
                 end },
                 { "row", grow = true },
-                { "text", #w.state.history .. " in history", fg = "muted", size = 12 },
+                { "text", #w.state.history .. " in history", fg = "muted", size = "small" },
             },
         },
     }

@@ -58,4 +58,4 @@ Debug form), `args`, `src` and `orig`.
 
 `ycode.dispatch` and `ycode.actions` only work inside a hook or ctor.
 
-See `hooks/example.x.lua`.
+See `hooks/example.x.lua`, and [UI.md](UI.md) for how panels and windows should look.
