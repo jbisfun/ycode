@@ -1,48 +1,84 @@
-# Zed
+# ycode
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+ycode is a fork of [Zed](https://github.com/zed-industries/zed) that can be scripted in
+Lua. Its own code is a hook system, [`crates/lua_hooks`](crates/lua_hooks). It lets
+plugins written in Lua intercept and replace any Zed action, add new actions and draw
+native gpui windows and dock panels. The rest of the editor is upstream Zed with a few
+small patches.
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+ycode is part of the [jbisfun](https://github.com/jbisfun) workspace, which is managed
+with [pull](https://github.com/jbisfun/pull). Most features live in plugins, not in this
+repo.
 
----
+## Lua hooks
 
-### Installation
+Hook files are `~/.config/zed/hooks/*.lua` and `*.x.lua`, plus one level of extension
+subdirectories (`hooks/<ext>/`). `.x.lua` files use directives modelled on
+[Logos](https://theos.dev/docs/logos-syntax):
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+```lua
+%hook editor
+- Copy
+  %log
+  %orig
+end
+%end
+```
 
-Other platforms are not yet available:
+- `%hook ns` / `- Action`: wrap `ns::Action` (`- *` wraps the whole namespace). If a
+  hook never calls `%orig`, the action is swallowed.
+- `%new - Name(args)`: a new action, shown in the command palette.
+- `%hookf point`: wrap a hook point in the Rust code (e.g. `client::authenticate`, the
+  automatic sign-in at startup).
+- `%ctor`, `%group`/`%init`, `%log`.
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+The Lua API (`ycode.*`, `gpui.*`) covers dispatching actions, a settings layer, the KV
+store, status-bar buttons, workspace folders, spawning processes and native UI elements
+(`gpui.open_window`, `gpui.register_panel`). LuaSocket comes embedded. Plugins are
+reloaded with `ycode: reload hooks` and never need a rebuild.
 
-### Developing Zed
+- [crates/lua_hooks/README.md](crates/lua_hooks/README.md): directives and API
+- [crates/lua_hooks/UI.md](crates/lua_hooks/UI.md): how Lua windows and panels should look
+- `crates/lua_hooks/ycode-lua`: REPL/runner for the live executor socket
+  (`$XDG_RUNTIME_DIR/ycode-lua.sock`)
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+## Plugins
 
-### Contributing
+Each plugin is its own repo, symlinked into `~/.config/zed/hooks/<name>/`:
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+- [ycode-pull](https://github.com/jbisfun/ycode-pull): pull's multi-repo Pull panel,
+  sessions and jobs. It replaces Zed's git panel, which handles only one repo.
+- [ycode-hermes](https://github.com/jbisfun/ycode-hermes): Hermes Agent as the agent,
+  over ACP
+- [ycode-idl](https://github.com/jbisfun/ycode-idl): panel for the idl CLI
+- [ycode-manager](https://github.com/jbisfun/ycode-manager): enable/disable plugins
+- [ycode-offline](https://github.com/jbisfun/ycode-offline): turns off sign-in and the
+  online features
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+## Changes to Zed
 
-### Licensing
+Outside `crates/lua_hooks`, the patches are small and generic:
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+- gpui: `App::intercept_actions`, a single slot that wraps every window and global
+  action dispatch
+- zed: `lua_hooks::init` runs after all other inits. Startup sign-in goes through the
+  `client::authenticate` hook point. The Lua C API is exported so `require` can load C
+  modules.
+- settings: a plugin settings layer (`SettingsStore::set_plugin_settings`)
+- command palette: `%new` actions appear in the palette, and actions can be hidden
+- workspace: Lua dock panels (`panel_index_for_id`)
+- agent_ui: `agent::SyncAgentThreads` imports an ACP agent's existing sessions
 
-License information for third party dependencies must be correctly provided for CI to pass.
+## Building
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+The build is the same as upstream Zed ([Linux](docs/src/development/linux.md),
+[macOS](docs/src/development/macos.md), [Windows](docs/src/development/windows.md)):
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+```sh
+cargo build -p zed        # target/debug/zed
+```
 
-## Sponsorship
+## License
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
-
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+ycode is licensed like upstream Zed: GPL-3.0-or-later, with Apache-2.0 components where
+marked. See `LICENSE-GPL` and `LICENSE-APACHE`.
