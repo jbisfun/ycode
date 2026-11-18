@@ -81,18 +81,22 @@ Measurements below are Zed's own (`crates/ui`). Sizes are rems, so they follow t
   tail while running unless the user scrolled up. Diagnostics lines use status colors,
   and file links are underlined on hover.
 
-## What this means for the Lua element set
+## The Lua element set
 
-The current elements (`col`, `row`, `text`, `button`, `input`) are styled divs, so the
-problems above show up in every plugin. The fix belongs in `lua_hooks` (`src/ui.rs`).
-Expose the native components. Don't imitate them in each plugin:
+`lua_hooks` (`src/ui/`) builds every element from Zed's own `ui` components, so a
+plugin describes structure and gets the native look. The full reference is the module
+doc in `src/ui/mod.rs`. In short:
 
-- `text` renders a `Label`: `size = "default" | "small" | "xsmall" | "large"`,
-  `color = "muted" | ...`, `mono`, `truncate`.
-- `row` centers its children by default.
-- `button` renders `ui::Button`: `style = "subtle" | "filled" | "transparent"`, `icon`, `tooltip`,
-  `disabled`. Add `icon_button{ icon, tooltip, on_click }`.
-- New elements: `icon`, `checkbox{ checked = true | false | "mixed" }`,
-  `toggle_group{ options, selected }`, `list_item{ selected, indent, start, end_, on_click }`,
-  `list_header`, `disclosure`, `divider`, `panel_header`.
-- `scroll = true` shows a scrollbar.
+- Structure carries the spacing: `panel{ header, footer, children }` (header at tab-bar
+  height, a body that scrolls with a scrollbar, a muted footer), `section{ "Title",
+  action, empty }`, `toolbar`, `split{ a, b, ratio, vertical }`, `empty{ "message" }`.
+- Rows are `list_item{ "label", detail, start, end_, end_hover, selected, indent }`.
+- Controls: `button` (subtle by default), `icon_button`, `checkbox`, `toggle_group`,
+  `disclosure`, `icon`, `divider`, `input`.
+- Sizes are named (`default small xsmall large`), spacing is a token (`none xs sm md lg
+  xl`) mapped to `DynamicSpacing`, and colors are theme names. Pixel numbers still work
+  but log a deprecation once.
+- Props are typed (serde, `deny_unknown_fields`): a misspelled or mistyped prop is an
+  error drawn in place of the element, not silently ignored.
+- `col`/`row` remain for anything else; a plugin that needs them for ordinary panel
+  layout is a sign the element set is missing something. Add it to `lua_hooks`.

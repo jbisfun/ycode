@@ -74,28 +74,26 @@ local function render(w)
         w.scroll_bottom("output")
     end
 
-    local output = { "col", id = "output", scroll = true, grow = true, p = 10, gap = 2, mono = true, size = "small" }
+    local output = { "col", id = "output", scroll = true, grow = true, p = "md", bg = "editor" }
     for _, line in ipairs(w.state.lines) do
         local k = kinds[line.kind]
-        output[#output + 1] = { "text", k.prefix .. line.text, fg = k.fg }
+        output[#output + 1] = { "text", k.prefix .. line.text, mono = true, size = "small", color = k.fg }
     end
 
-    return { "col", w = "full", h = "full",
+    return { "panel", scroll = false,
+        footer = #w.state.history .. " in history",
         output,
-        { "col", p = 8, gap = 6, bg = "panel", border = "border",
-            { "input", id = "code", multiline = true, h = 120, mono = true,
+        { "divider" },
+        { "col", gap = "sm", p = "md",
+            { "input", id = "code", multiline = true, h = 120,
               placeholder = "Lua or %hook … %end   (ctrl-enter: run, ctrl-↑/↓: history)" },
-            { "row", gap = 6, align = "center",
-                { "button", "Run", on_click = run },
+            { "row", gap = "xs",
+                { "button", "Run", style = "filled", on_click = run },
                 { "button", "Clear", on_click = function(w) w.state.lines = {} end },
                 { "button", "Reload hooks", on_click = function()
                     ycode.dispatch("ycode::ReloadHooks")
                     ycode.dispatch("ycode::Executor")
-                end },
-                { "row", grow = true },
-                { "text", #w.state.history .. " in history", fg = "muted", size = "small" },
-            },
-        },
+                end } } },
     }
 end
 
