@@ -2146,6 +2146,7 @@ pub fn handle_keymap_file_changes(
     cx: &mut App,
 ) {
     let (base_keymap_tx, mut base_keymap_rx) = mpsc::unbounded();
+    let reload_keymap_tx = base_keymap_tx.clone();
     let (keyboard_layout_tx, mut keyboard_layout_rx) = mpsc::unbounded();
     let mut old_base_keymap = *BaseKeymap::get_global(cx);
     let mut old_vim_enabled = VimModeSetting::get_global(cx).0;
@@ -2203,6 +2204,12 @@ pub fn handle_keymap_file_changes(
         .detach();
     }
 
+    // Hooks may add bindings via `%hookf keymap::user`; re-evaluate after every reload.
+    lua_hooks::observe_reload(cx, move |_| {
+        reload_keymap_tx.unbounded_send(()).ok();
+    })
+    .detach();
+
     load_default_keymap(cx);
 
     struct KeymapParseErrorNotification;
@@ -2237,7 +2244,8 @@ pub fn handle_keymap_file_changes(
                         });
                     });
                 }
-                let load_result = KeymapFile::load(&user_keymap_content, cx);
+                let hooked_content = hooked_user_keymap(&user_keymap_content, cx);
+                let load_result = KeymapFile::load(&hooked_content, cx);
                 match load_result {
                     KeymapFileLoadResult::Success { key_bindings } => {
                         reload_keymaps(cx, key_bindings);
@@ -2260,6 +2268,32 @@ pub fn handle_keymap_file_changes(
         }
     })
     .detach();
+}
+
+/// `%hookf keymap::user(sections)`: hooks receive the user keymap's sections (parsed
+/// keymap.json) and return the sections to bind. Later sections win, so a hook that
+/// prepends its own lets keymap.json override it. Unparsable files are passed through so
+/// the usual error notification still shows.
+fn hooked_user_keymap<'a>(content: &'a str, cx: &mut App) -> std::borrow::Cow<'a, str> {
+    let sections = if content.trim().is_empty() {
+        Vec::new()
+    } else {
+        match settings::parse_json_with_comments::<Vec<serde_json::Value>>(content) {
+            Ok(sections) => sections,
+            Err(_) => return content.into(),
+        }
+    };
+    let original = serde_json::Value::Array(sections);
+    let hooked =
+        lua_hooks::call_point(cx, "keymap::user", original.clone(), |sections, _| sections);
+    match hooked {
+        serde_json::Value::Array(_) if hooked != original => hooked.to_string().into(),
+        serde_json::Value::Array(_) => content.into(),
+        other => {
+            log::error!("keymap::user hook returned {other}, expected an array");
+            content.into()
+        }
+    }
 }
 
 fn show_keymap_file_json_error(

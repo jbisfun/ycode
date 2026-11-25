@@ -33,6 +33,19 @@ Debug form), `args`, `src` and `orig`.
 - If several hooks match, the one defined last runs first.
 - If a hook errors before calling `%orig`, the original still runs.
 
+## Hook points (`%hookf`)
+
+A non-nil return value replaces the point's result. Call `%orig(x)` so that other hooks
+on the same point still run.
+
+- `client::authenticate()`: automatic sign-in at startup. Leave out `%orig` to skip it.
+- `keymap::user(sections)`: the sections of the user's keymap.json, parsed. Return the
+  sections to bind. Later sections win, so prepend your own if keymap.json should still
+  override them. This point is re-evaluated after every hook reload.
+- `tasks::global(tasks)`: extra global tasks (`tasks.json` objects), starting from `{}`.
+  They are loaded into every project as `<hooks dir>/tasks.json` when the project opens
+  and on every reload.
+
 ## Lua API
 
 - `ycode.log(...)`

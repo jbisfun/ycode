@@ -267,6 +267,12 @@ fn track_workspace_folders(cx: &mut App) {
         let handle = window.window_handle();
         record(ws, handle, cx);
         let project = ws.project().clone();
+        let weak = project.downgrade();
+        cx.defer(move |cx| {
+            if let Some(project) = weak.upgrade() {
+                sync_tasks(&[project], cx);
+            }
+        });
         cx.subscribe(&project, move |ws, _, event, cx| {
             if matches!(
                 event,
@@ -285,6 +291,53 @@ fn track_workspace_folders(cx: &mut App) {
         .detach();
     })
     .detach();
+}
+
+/// `%hookf tasks::global(tasks)`: hooks return extra global tasks (an array of `tasks.json`
+/// objects). They are loaded into every open project's task inventory as if they came from
+/// `<hooks dir>/tasks.json`, and recomputed when a project opens or hooks reload.
+fn sync_tasks(projects: &[gpui::Entity<project::Project>], cx: &mut App) {
+    let tasks = call_point(cx, "tasks::global", Json::Array(Vec::new()), |a, _| a);
+    let tasks = match tasks {
+        Json::Array(tasks) => tasks,
+        Json::Null => Vec::new(),
+        Json::Object(o) if o.is_empty() => Vec::new(), // `return {}` from Lua
+        other => {
+            log::error!(target: "lua_hooks", "tasks::global: expected an array, got {other}");
+            return;
+        }
+    };
+    let json = Json::Array(tasks).to_string();
+    let path = hooks_dir().join("tasks.json");
+    for project in projects {
+        let Some(inventory) = project.read(cx).task_store().read(cx).task_inventory().cloned()
+        else {
+            continue;
+        };
+        inventory.update(cx, |inventory, _| {
+            if let Err(e) = inventory.update_file_based_tasks(
+                project::task_store::TaskSettingsLocation::Global(&path),
+                Some(&json),
+            ) {
+                log::error!(target: "lua_hooks", "tasks::global: {e}");
+            }
+        });
+    }
+}
+
+fn open_projects(cx: &App) -> Vec<gpui::Entity<project::Project>> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<workspace::MultiWorkspace>())
+        .filter_map(|w| w.read(cx).ok())
+        .flat_map(|mw| mw.workspaces().map(|ws| ws.read(cx).project().clone()).collect::<Vec<_>>())
+        .collect()
+}
+
+/// Runs `f` after every hook (re)load, e.g. to re-evaluate a `%hookf` point
+/// (zed's keymap loader re-reads `keymap::user`).
+pub fn observe_reload(cx: &mut App, mut f: impl FnMut(&mut App) + 'static) -> gpui::Subscription {
+    cx.observe_global::<LuaHooks>(move |cx| f(cx))
 }
 
 /// `ycode.workspace_folders()`: folders open in workspaces, the active window's first,
@@ -839,6 +892,15 @@ pub fn install(cx: &mut App, rt: Runtime, mut errors: Vec<String>) -> Vec<String
     // Status bar buttons and dock panels come from the runtime; rebuild them.
     cx.refresh_windows();
     panel::sync_all(cx);
+    // Deferred: ReloadHooks may run inside a workspace update (double lease).
+    cx.defer(|cx| {
+        let projects = open_projects(cx);
+        sync_tasks(&projects, cx);
+    });
+    if cx.has_global::<LuaHooks>() {
+        // Notifies `observe_reload` subscribers.
+        cx.update_global::<LuaHooks, _>(|_, _| {});
+    }
     errors
 }
 
